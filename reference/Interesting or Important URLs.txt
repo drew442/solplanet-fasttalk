@@ -1,0 +1,17 @@
+https://www.waveshare.com/wiki/USB_TO_RS485
+https://www.waveshare.com/usb-to-rs485.htm
+https://github.com/zbigniewmotyka/home-assistant-solplanet
+https://github.com/calvinbui/home-assistant-solplanet
+https://dev.to/alexchen31337/i-reverse-engineered-my-solar-inverter-api-to-export-5kw-to-the-grid-47hp
+https://community.home-assistant.io/t/solplanet-aiswei-inverter-integration/511549 (as well as the many subsequent pages of this thread)
+https://community.home-assistant.io/t/api-integration-for-solplanet-inverter-aiswei/569754 (as well as the many subsequent pages of this thread)
+https://community.home-assistant.io/t/solis-inverter-modbus-integration/292553 (as well as the many subsequent pages of this thread)
+https://github.com/evcc-io/evcc/blob/b66d6532aefe9ab3b31e999cde70aba56323c0c2/templates/definition/meter/solplanet-ai-dongle.yaml
+https://github.com/evcc-io/evcc/pull/31732
+https://github.com/evcc-io/evcc/pull/31908
+https://github.com/evcc-io/evcc/pull/31480
+https://github.com/Pho3niX90/solis_modbus
+https://solis-modbus.readthedocs.io/en/latest/index.html
+https://solis-modbus.readthedocs.io/en/latest/sensors.html
+https://forecast.solar/
+https://doc.forecast.solar/
