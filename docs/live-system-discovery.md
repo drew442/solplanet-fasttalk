@@ -7,9 +7,11 @@ This runbook gathers read-only Modbus RTU evidence from the initial test plant:
   Waveshare USB-RS485 adapter.
 
 The baseline and CT-data stages do **not** query the Eastron meter directly.
-Stage 6 adds a narrowly scoped read-only meter query through a transparent
-route recovered from the Ai dongle firmware. It uses the existing MONITOR-port
-connection and does not require touching the live terminal-8 wiring.
+Stage 6 adds a narrowly scoped read-only meter-route hypothesis recovered from
+the Ai dongle firmware. It uses the existing MONITOR-port connection and does
+not require touching the live terminal-8 wiring. Stage 7 reads the dongle's
+configured meter address and performs a bounded, read-only MONITOR-bus slave
+scan.
 
 ## Safety properties
 
@@ -18,9 +20,11 @@ deliberately narrow protocol surface:
 
 - it implements only function `0x04` (read input registers) and function
   `0x03` (read holding registers);
-- it contains no write-register, write-coil, arbitrary-frame, slave-address
-  scan, or generic register-read command;
+- it contains no write-register, write-coil, arbitrary-frame, or generic
+  register-read command;
 - its device profiles and addresses are fixed in source;
+- its optional slave scan uses only two fixed two-register function-`0x04`
+  signatures, defaults to addresses `1`–`16`, and never writes;
 - the ASW inverter serial-number range `31003`–`31018` is not queried;
 - the experimental ASW `CT Data` ranges are disabled unless `--extended` is
   supplied; and
@@ -131,7 +135,7 @@ python3 tools/live_modbus_discovery.py probe asw \
 
 Earlier tests at 38400 and 19200 produced no response. Do not repeat them
 unless the inverter communication configuration or firmware has changed. Do
-not scan all slave addresses or arbitrary baud rates.
+not scan arbitrary baud rates.
 
 The successful ASW baseline captures:
 
@@ -259,7 +263,7 @@ specific, bounded route to test.
 
 Static analysis of firmware `610-50017-05` recovered the Ai dongle's meter
 poll. It sends an ordinary Eastron Modbus RTU function-`0x04` frame on its
-inverter UART and receives an ordinary meter response. See
+inverter-facing UART and receives an ordinary meter response. See
 [`ai-dongle-firmware.md`](ai-dongle-firmware.md) for the evidence.
 
 First reproduce only the dongle's confirmed channel-1 addresses:
@@ -272,13 +276,18 @@ python3 tools/live_modbus_discovery.py probe asw-meter-tunnel \
   --verbose
 ```
 
-This profile uses meter slave address `1`, not inverter slave address `3`. Its
+This profile used meter slave address `1`, not inverter slave address `3`. Its
 first frame reads input-register offset `52`, count `2`, which is the exact
-fast total-active-power request recovered from the firmware. If that receives
-no response, the tool stops immediately.
+fast total-active-power request recovered from the firmware.
 
-If the normal meter route succeeds, run one additional sample with the
-read-only channel-2 candidates enabled:
+The returned `discovery-output/asw-meter-tunnel.json` is silent: there was no
+response, exception, or adapter echo within 1.5 seconds. This means there is
+no evidence for a slave-1 meter route on MONITOR. It does not distinguish an
+absent slave 1 from a non-transparent terminal-8 bus.
+
+Do not run the extended channel-2 candidates unless a later test first
+produces a valid channel-1 response. If that prerequisite is met, the command
+is:
 
 ```console
 python3 tools/live_modbus_discovery.py probe asw-meter-tunnel \
@@ -295,7 +304,58 @@ by other Eastron multi-channel meters; the available SEM3-M-2L manual does not
 publish its second-channel register map. These requests use function `0x04`
 only and cannot alter meter or inverter state.
 
-Return both JSON files. Do not try other slave IDs or register ranges yet. If
-channel 1 succeeds and the `+3000` candidates fail, the next controlled test
-will check the alternative Eastron dual-address mode at fixed slave address
-`2`.
+## Stage 7: read the configured address and scan the MONITOR bus
+
+The dongle firmware registers `GET /paraget.cgi`. Its JSON includes
+`meter_en`, `meter_add`, and `meter_mod`, but also device identifiers and a
+possible cloud credential in `key`. The safe collector never saves the raw
+response or the sensitive values:
+
+```console
+python3 tools/ai_dongle_discovery.py \
+  --base-url http://REPLACE_WITH_AI_DONGLE_IP \
+  --output discovery-output/ai-dongle-parameters.json
+```
+
+Use the Ai dongle's current LAN address. Supplying an IP without `http://` is
+also accepted. The request is read-only and fixed to `/paraget.cgi`; the tool
+cannot invoke any setter CGI. Return `ai-dongle-parameters.json`.
+
+This endpoint is not a complete backup or restore facility. It is a
+human-readable snapshot of the dongle's main parameters. Do not manually
+query `/wlanget.cgi` or `/ifconfig.cgi`, because those responses may contain
+WLAN credentials. Never call `/paraset.cgi`, `/setting.cgi`,
+`/nvs_clear.cgi`, or another setter during discovery.
+
+Next scan only the usual low address range on the existing ASW MONITOR
+adapter:
+
+Do not run the scan while an Ai dongle is simultaneously attached and active
+on the same inverter communication segment. Collect the CGI snapshot first,
+then restore the already-tested Waveshare-only MONITOR topology before
+scanning. Two active Modbus masters can collide.
+
+```console
+python3 tools/live_modbus_discovery.py scan \
+  --device /dev/serial/by-id/REPLACE_WITH_ASW_ADAPTER \
+  --baud 9600 \
+  --start-slave 1 \
+  --end-slave 16 \
+  --output discovery-output/asw-slave-scan-1-16.json \
+  --verbose
+```
+
+For each address, the scan sends the recovered Eastron input-register
+offset-52/count-2 request. If that is silent, it sends the confirmed ASW
+device-header offset-1000/count-2 request. Both use function `0x04`. A valid
+normal reply or a valid Modbus exception proves that the address is occupied.
+The second signature ensures that the known ASW at address 3 remains
+discoverable even if it silently discards the Eastron register address.
+
+The default 0.35-second timeout makes the 1–16 pass take at most roughly
+13 seconds including gaps when most addresses are silent. Do not expand the
+range until the safe CGI result and this first scan have been analysed.
+
+Return `asw-slave-scan-1-16.json`. If `meter_add` identifies an address outside
+1–16, test only that single address with equal start and end values rather
+than scanning the rest of the Modbus range.

@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+import io
 import os
 import pty
 import struct
@@ -12,9 +14,11 @@ from tools.live_modbus_discovery import (
     SerialRTU,
     append_crc,
     build_read_request,
+    classify_scan_response,
     crc16_modbus,
     decode_fields,
     parse_read_response,
+    perform_slave_scan,
     selected_groups,
     DiscoveryError,
 )
@@ -54,6 +58,69 @@ class ModbusCodecTests(unittest.TestCase):
         response = bytes.fromhex("01 04 04 12 34 ab cd 00 00")
         with self.assertRaises(DiscoveryError):
             parse_read_response(request, response, 2)
+
+    def test_scan_treats_modbus_exception_as_a_present_slave(self) -> None:
+        request = build_read_request(7, 0x04, 52, 2)
+        response = append_crc(bytes.fromhex("07 84 02"))
+        self.assertEqual(
+            classify_scan_response(request, response, 2),
+            {
+                "kind": "exception",
+                "exception_code": "0x02",
+            },
+        )
+
+    def test_scan_classifies_normal_data_response(self) -> None:
+        request = build_read_request(3, 0x04, 1000, 2)
+        response = append_crc(bytes.fromhex("03 04 04 00 33 00 03"))
+        self.assertEqual(
+            classify_scan_response(request, response, 2),
+            {
+                "kind": "data",
+                "registers": ["0x0033", "0x0003"],
+            },
+        )
+
+    def test_bounded_scan_uses_fallback_signature(self) -> None:
+        requests = []
+
+        class FakeSerial:
+            def exchange(self, request):
+                requests.append(request)
+                slave = request[0]
+                pdu_start = (request[2] << 8) | request[3]
+                if slave == 2 and pdu_start == 52:
+                    response = append_crc(bytes.fromhex("02 84 02"))
+                    return response, response, False
+                if slave == 3 and pdu_start == 1000:
+                    response = append_crc(
+                        bytes.fromhex("03 04 04 00 33 00 03")
+                    )
+                    return response, response, False
+                raise DiscoveryError("no response within 0.01s")
+
+        with redirect_stdout(io.StringIO()):
+            results = perform_slave_scan(
+                FakeSerial(),
+                start_slave=1,
+                end_slave=3,
+                request_gap=0,
+                verbose=False,
+            )
+        self.assertEqual(
+            [entry["status"] for entry in results],
+            ["silent", "present", "present"],
+        )
+        self.assertEqual(
+            [len(entry["probes"]) for entry in results],
+            [2, 1, 2],
+        )
+        self.assertEqual(results[1]["response_kind"], "exception")
+        self.assertEqual(
+            results[2]["matched_probe"],
+            "asw_device_header_signature",
+        )
+        self.assertEqual(len(requests), 5)
 
     def test_serial_exchange_over_pseudo_terminal(self) -> None:
         master_fd, slave_fd = pty.openpty()

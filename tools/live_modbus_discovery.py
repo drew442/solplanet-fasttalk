@@ -25,7 +25,7 @@ import time
 from typing import Any, Iterable, Sequence
 
 
-TOOL_VERSION = "0.3"
+TOOL_VERSION = "0.4"
 READ_FUNCTIONS = frozenset((0x03, 0x04))
 BAUD_RATES = {
     2400: termios.B2400,
@@ -452,8 +452,8 @@ ASW_PROFILE = Profile(
 EASTRON_TUNNEL_PROFILE = Profile(
     name="asw-meter-tunnel",
     description=(
-        "Read-only Eastron smart-meter probe through the Solplanet "
-        "ASW MONITOR-port transparent Modbus route"
+        "Experimental read-only Eastron smart-meter probe through the "
+        "Solplanet ASW MONITOR connection"
     ),
     slave=1,
     default_baud=9600,
@@ -623,6 +623,41 @@ def parse_read_response(
         (payload[index] << 8) | payload[index + 1]
         for index in range(0, len(payload), 2)
     ]
+
+
+def classify_scan_response(
+    request: bytes,
+    response: bytes,
+    expected_count: int,
+) -> dict[str, Any]:
+    """Classify a scan response without treating Modbus exceptions as absence."""
+    if len(response) < 5:
+        raise DiscoveryError(f"short response ({len(response)} bytes)")
+    received_crc = response[-2] | (response[-1] << 8)
+    calculated_crc = crc16_modbus(response[:-2])
+    if received_crc != calculated_crc:
+        raise DiscoveryError(
+            f"CRC mismatch: received 0x{received_crc:04x}, "
+            f"calculated 0x{calculated_crc:04x}"
+        )
+    if response[0] != request[0]:
+        raise DiscoveryError(
+            f"unexpected slave {response[0]}, expected {request[0]}"
+        )
+    if response[1] == (request[1] | 0x80):
+        if len(response) != 5:
+            raise DiscoveryError(
+                f"exception response has unexpected length {len(response)}"
+            )
+        return {
+            "kind": "exception",
+            "exception_code": f"0x{response[2]:02x}",
+        }
+    registers = parse_read_response(request, response, expected_count)
+    return {
+        "kind": "data",
+        "registers": [f"0x{value:04x}" for value in registers],
+    }
 
 
 def _signed(value: int, bits: int) -> int:
@@ -871,6 +906,121 @@ def perform_group_read(
     return result
 
 
+SCAN_PROBES = (
+    ReadGroup(
+        "eastron_total_active_power_signature",
+        0x04,
+        30053,
+        52,
+        2,
+        note=(
+            "The exact Eastron total-active-power request recovered from the "
+            "Ai dongle firmware."
+        ),
+    ),
+    ReadGroup(
+        "asw_device_header_signature",
+        0x04,
+        31001,
+        1000,
+        2,
+        note=(
+            "The confirmed ASW device-header request; attempted only when the "
+            "Eastron signature receives no valid response."
+        ),
+    ),
+)
+
+
+def perform_slave_scan(
+    serial_port: SerialRTU,
+    start_slave: int,
+    end_slave: int,
+    request_gap: float,
+    verbose: bool,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for slave in range(start_slave, end_slave + 1):
+        slave_result: dict[str, Any] = {
+            "slave": slave,
+            "status": "silent",
+            "probes": [],
+        }
+        print(f"  slave {slave:3d}: ", end="", flush=True)
+        for probe_index, group in enumerate(SCAN_PROBES):
+            request = build_read_request(
+                slave,
+                group.function,
+                group.pdu_start,
+                group.count,
+            )
+            probe_result: dict[str, Any] = {
+                "name": group.name,
+                "timestamp_utc": utc_now(),
+                "function": f"0x{group.function:02x}",
+                "pdu_start": group.pdu_start,
+                "count": group.count,
+                "request_hex": request.hex(" "),
+                "note": group.note,
+            }
+            try:
+                wire, response, echo_removed = serial_port.exchange(request)
+                probe_result["wire_hex"] = wire.hex(" ")
+                probe_result["response_hex"] = response.hex(" ")
+                probe_result["adapter_echo_removed"] = echo_removed
+                classification = classify_scan_response(
+                    request,
+                    response,
+                    group.count,
+                )
+                probe_result.update(classification)
+                probe_result["status"] = "response"
+                slave_result["status"] = "present"
+                slave_result["matched_probe"] = group.name
+                slave_result["response_kind"] = classification["kind"]
+                if "exception_code" in classification:
+                    slave_result["exception_code"] = classification[
+                        "exception_code"
+                    ]
+                slave_result["probes"].append(probe_result)
+                break
+            except DiscoveryError as exc:
+                probe_result["status"] = (
+                    "no_response"
+                    if str(exc).startswith("no response within")
+                    else "invalid_response"
+                )
+                probe_result["error"] = str(exc)
+                slave_result["probes"].append(probe_result)
+                if probe_result["status"] == "invalid_response":
+                    slave_result["status"] = "invalid_response"
+                    break
+            if probe_index + 1 < len(SCAN_PROBES):
+                time.sleep(request_gap)
+
+        if slave_result["status"] == "present":
+            detail = slave_result["matched_probe"]
+            if slave_result["response_kind"] == "exception":
+                detail += f", exception {slave_result['exception_code']}"
+            print(f"present ({detail})")
+        elif slave_result["status"] == "invalid_response":
+            print("invalid response")
+        else:
+            print("silent")
+        if verbose:
+            for probe in slave_result["probes"]:
+                print(f"       {probe['name']}: {probe['status']}")
+                print(f"         request: {probe['request_hex']}")
+                if probe.get("response_hex"):
+                    print(f"         response: {probe['response_hex']}")
+                elif probe.get("error"):
+                    print(f"         error: {probe['error']}")
+        results.append(slave_result)
+        if slave < end_slave:
+            time.sleep(request_gap)
+    return results
+
+
 def _display_value(entry: dict[str, Any]) -> str:
     value = entry.get("value")
     unit = entry.get("unit", "")
@@ -1052,6 +1202,97 @@ def command_probe(args: argparse.Namespace) -> int:
     return 0 if result["status"] in ("ok", "partial") else 2
 
 
+def command_scan(args: argparse.Namespace) -> int:
+    if args.baud not in BAUD_RATES:
+        raise DiscoveryError(f"unsupported baud rate: {args.baud}")
+    if not 1 <= args.start_slave <= 247:
+        raise DiscoveryError("--start-slave must be between 1 and 247")
+    if not 1 <= args.end_slave <= 247:
+        raise DiscoveryError("--end-slave must be between 1 and 247")
+    if args.start_slave > args.end_slave:
+        raise DiscoveryError("--start-slave cannot exceed --end-slave")
+    if args.timeout <= 0:
+        raise DiscoveryError("--timeout must be greater than zero")
+
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "tool": "solplanet-fasttalk-live-modbus-discovery",
+        "tool_version": TOOL_VERSION,
+        "started_at_utc": utc_now(),
+        "operation": "read_only_slave_scan",
+        "serial": {
+            "device": args.device,
+            "resolved_device": os.path.realpath(args.device),
+            "baud": args.baud,
+            "data_bits": 8,
+            "parity": "none",
+            "stop_bits": 1,
+            "timeout_seconds": args.timeout,
+        },
+        "range": {
+            "start_slave": args.start_slave,
+            "end_slave": args.end_slave,
+        },
+        "safety": {
+            "permitted_function_codes": ["0x04"],
+            "write_capability_present": False,
+            "fixed_probe_addresses": [52, 1000],
+            "registers_per_request": 2,
+        },
+        "slaves": [],
+    }
+
+    print(
+        f"Opening {args.device}: read-only slave scan "
+        f"{args.start_slave}-{args.end_slave}, {args.baud}-8-N-1",
+        flush=True,
+    )
+    try:
+        with SerialRTU(args.device, args.baud, args.timeout) as serial_port:
+            result["slaves"] = perform_slave_scan(
+                serial_port,
+                args.start_slave,
+                args.end_slave,
+                request_gap=0.05,
+                verbose=args.verbose,
+            )
+    except (DiscoveryError, OSError) as exc:
+        result["fatal_error"] = str(exc)
+        print(f"[fatal] {exc}", file=sys.stderr)
+
+    result["finished_at_utc"] = utc_now()
+    present = [
+        entry["slave"]
+        for entry in result["slaves"]
+        if entry["status"] == "present"
+    ]
+    invalid = [
+        entry["slave"]
+        for entry in result["slaves"]
+        if entry["status"] == "invalid_response"
+    ]
+    result["present_slaves"] = present
+    result["invalid_response_slaves"] = invalid
+    result["status"] = "failed" if "fatal_error" in result else "ok"
+
+    if args.output:
+        output = Path(args.output)
+        write_json(output, result)
+        print(f"Saved discovery output to {output}")
+    else:
+        print("No --output path supplied; results were not saved.")
+    print(
+        "Valid responding slave addresses: "
+        + (", ".join(str(slave) for slave in present) if present else "none")
+    )
+    if invalid:
+        print(
+            "Addresses with invalid/corrupt responses: "
+            + ", ".join(str(slave) for slave in invalid)
+        )
+    return 0 if result["status"] == "ok" else 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -1116,6 +1357,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="also print raw request and response frames",
     )
     probe_parser.set_defaults(handler=command_probe)
+
+    scan_parser = commands.add_parser(
+        "scan",
+        help="scan a bounded slave range using two fixed read-only signatures",
+    )
+    scan_parser.add_argument(
+        "--device",
+        required=True,
+        help="serial device, preferably a /dev/serial/by-id path",
+    )
+    scan_parser.add_argument(
+        "--baud",
+        type=int,
+        default=9600,
+        help="serial baud rate (default: 9600)",
+    )
+    scan_parser.add_argument(
+        "--start-slave",
+        type=int,
+        default=1,
+        help="first Modbus slave address (default: 1)",
+    )
+    scan_parser.add_argument(
+        "--end-slave",
+        type=int,
+        default=16,
+        help="last Modbus slave address, inclusive (default: 16)",
+    )
+    scan_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=0.35,
+        help="response timeout per fixed probe in seconds (default: 0.35)",
+    )
+    scan_parser.add_argument(
+        "--output",
+        help="write structured JSON results to this path",
+    )
+    scan_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="also print raw request and response frames",
+    )
+    scan_parser.set_defaults(handler=command_scan)
     return parser
 
 
