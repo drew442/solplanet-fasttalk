@@ -86,6 +86,16 @@ class ModbusCodecTests(unittest.TestCase):
 
 
 class ProfileTests(unittest.TestCase):
+    def test_confirmed_profile_serial_defaults(self) -> None:
+        self.assertEqual(
+            (SOLIS_PROFILE.slave, SOLIS_PROFILE.default_baud),
+            (1, 9600),
+        )
+        self.assertEqual(
+            (ASW_PROFILE.slave, ASW_PROFILE.default_baud),
+            (3, 9600),
+        )
+
     def test_asw_profile_skips_inverter_serial_number(self) -> None:
         queried = set()
         for group in ASW_PROFILE.groups:
@@ -100,8 +110,33 @@ class ProfileTests(unittest.TestCase):
     def test_extended_ct_group_is_opt_in(self) -> None:
         default_names = {group.name for group in selected_groups(ASW_PROFILE, False)}
         extended_names = {group.name for group in selected_groups(ASW_PROFILE, True)}
-        self.assertNotIn("ct_data_experimental", default_names)
-        self.assertIn("ct_data_experimental", extended_names)
+        ct_names = {
+            group.name for group in ASW_PROFILE.groups if group.extended
+        }
+        self.assertEqual(len(ct_names), 8)
+        self.assertTrue(ct_names.isdisjoint(default_names))
+        self.assertTrue(ct_names.issubset(extended_names))
+
+    def test_ct_ranges_are_split_at_semantic_boundaries(self) -> None:
+        ct_groups = [group for group in ASW_PROFILE.groups if group.extended]
+        ct_ranges = [
+            (group.reference_start, group.count) for group in ct_groups
+        ]
+        self.assertEqual(
+            ct_ranges,
+            [
+                (46401, 6),
+                (46407, 6),
+                (46413, 6),
+                (46419, 6),
+                (46425, 9),
+                (46434, 9),
+                (46443, 8),
+                (46451, 1),
+            ],
+        )
+        for group in ct_groups:
+            self.assertEqual(group.pdu_start, group.reference_start - 40001)
 
     def test_solis_u32_and_scaled_fields_decode(self) -> None:
         group = SOLIS_PROFILE.groups[0]
@@ -109,6 +144,55 @@ class ProfileTests(unittest.TestCase):
         decoded = decode_fields(group, registers)
         self.assertEqual(decoded["active_power"]["value"], 65538)
         self.assertEqual(decoded["total_dc_power"]["value"], 196612)
+
+    def test_asw_firmware_specific_decoding(self) -> None:
+        groups = {group.name: group for group in ASW_PROFILE.groups}
+
+        header = decode_fields(groups["device_header"], [0x0033, 0x0003])
+        self.assertEqual(header["device_type"]["value"], "3")
+
+        inverter_status = decode_fields(
+            groups["inverter_status"],
+            [
+                2300,
+                5000,
+                0xFFFF,
+                0xFF8C,
+                0xFFFF,
+                0xEF9A,
+                0,
+                2295,
+                1,
+            ],
+        )
+        self.assertEqual(inverter_status["inverter_energy_today"]["value"], -11.6)
+        self.assertEqual(inverter_status["inverter_energy_total"]["value"], -419.8)
+
+        storage_registers = [0] * 33
+        storage_registers[20] = 0x8000  # 31621 battery temperature
+        storage_registers[21] = 83  # 31622 battery SOC
+        storage_registers[22] = 0xFFFF  # 31623 battery SOH
+        storage = decode_fields(
+            groups["storage_and_battery"],
+            storage_registers,
+        )
+        self.assertIsNone(storage["battery_temperature"]["value"])
+        self.assertEqual(
+            storage["battery_temperature"]["quality"],
+            "documented_nan",
+        )
+        self.assertEqual(storage["battery_soc"]["value"], 83)
+        self.assertIsNone(storage["battery_soh"]["value"])
+
+        grid_registers = [0] * 19
+        grid_registers[0:2] = [0xFFFF, 0xF000]
+        grid = decode_fields(groups["grid"], grid_registers)
+        self.assertEqual(grid["grid_phase_1_active_power"]["value"], -4096)
+
+        meter_registers = [0] * 8
+        meter_registers[2:4] = [0x8000, 0x0000]
+        meter = decode_fields(groups["smart_meter_state"], meter_registers)
+        self.assertIsNone(meter["smart_meter_target_power"]["value"])
 
     def test_all_profile_operations_are_bounded_reads(self) -> None:
         for profile in (SOLIS_PROFILE, ASW_PROFILE):
@@ -122,6 +206,11 @@ class ProfileTests(unittest.TestCase):
                         field.reference,
                         group.reference_start + group.count,
                     )
+                decoded = decode_fields(group, [0] * group.count)
+                self.assertFalse(
+                    any("error" in entry for entry in decoded.values()),
+                    group.name,
+                )
 
 
 if __name__ == "__main__":

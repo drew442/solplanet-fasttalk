@@ -20,7 +20,7 @@ deliberately narrow protocol surface:
   scan, or generic register-read command;
 - its device profiles and addresses are fixed in source;
 - the ASW inverter serial-number range `31003`–`31018` is not queried;
-- the experimental ASW `CT Data` range is disabled unless `--extended` is
+- the experimental ASW `CT Data` ranges are disabled unless `--extended` is
   supplied; and
 - the first identity read must succeed before the rest of a profile is sent.
 
@@ -112,43 +112,23 @@ serial settings.
 
 ## Stage 3: ASW baseline
 
-The ASW Modbus profile defaults to slave address `3`. The test connection is
-the working MONITOR-port pins 7 and 8 connection, not terminal 8 and not the
-smart-meter cable.
+Live discovery confirmed that the test ASW uses slave address `3` at
+9600-8-N-1. The test connection is the working MONITOR-port pins 7 and 8
+connection, not terminal 8 and not the smart-meter cable.
 
-Start at 38400 baud:
-
-```console
-python3 tools/live_modbus_discovery.py probe asw \
-  --device /dev/serial/by-id/REPLACE_WITH_ASW_ADAPTER \
-  --baud 38400 \
-  --output discovery-output/asw-38400-baseline.json \
-  --verbose
-```
-
-If and only if the first identity read receives no valid response, repeat at
-9600:
+Run the baseline at the confirmed baud:
 
 ```console
 python3 tools/live_modbus_discovery.py probe asw \
   --device /dev/serial/by-id/REPLACE_WITH_ASW_ADAPTER \
   --baud 9600 \
-  --output discovery-output/asw-9600-baseline.json \
+  --output discovery-output/asw-baseline.json \
   --verbose
 ```
 
-If both fail, one final 19200-baud identity attempt is reasonable:
-
-```console
-python3 tools/live_modbus_discovery.py probe asw \
-  --device /dev/serial/by-id/REPLACE_WITH_ASW_ADAPTER \
-  --baud 19200 \
-  --output discovery-output/asw-19200-baseline.json \
-  --verbose
-```
-
-Stop after these attempts and review the raw responses. Do not scan all slave
-addresses or continue through arbitrary baud rates.
+Earlier tests at 38400 and 19200 produced no response. Do not repeat them
+unless the inverter communication configuration or firmware has changed. Do
+not scan all slave addresses or arbitrary baud rates.
 
 The successful ASW baseline captures:
 
@@ -160,24 +140,46 @@ The successful ASW baseline captures:
 - smart-meter online state and current smart-meter power; and
 - the configured charge/discharge state and limits, using reads only.
 
+The live firmware differs from the V2.1.4 register document in several places.
+The discovery profile incorporates the observed behavior:
+
+- device type is a one-register ASCII string (`"3"` for three-phase);
+- inverter energy today and total are signed net-energy counters;
+- battery SOC is expressed in whole percent;
+- grid-side phase active power is signed; and
+- `0x8000`/`0x80000000` signed NaN values are reported as unavailable.
+
 ## Stage 4: experimental ASW CT-data read
 
 Only after the normal ASW profile succeeds, repeat it once with the V2.1.4
-`CT Data` range enabled:
+`CT Data` ranges enabled:
 
 ```console
 python3 tools/live_modbus_discovery.py probe asw \
   --device /dev/serial/by-id/REPLACE_WITH_ASW_ADAPTER \
-  --baud REPLACE_WITH_WORKING_BAUD \
+  --baud 9600 \
   --extended \
-  --output discovery-output/asw-extended.json \
+  --output discovery-output/asw-ct-split.json \
   --verbose
 ```
 
 These registers are marked RW in the vendor document, but the tool only reads
 them with function `0x03`. Their relationship to the Eastron terminal-8 meter
-is unknown. All-zero, all-`0xffff`, exception, stale, or plausible live values
-are each useful results—do not attempt to populate the registers.
+is unknown. The original single 51-register request returned exception `0x02`,
+which could have been caused by any one unsupported address. Version 0.2
+therefore uses eight semantic ranges:
+
+- `46401–46406`: phase voltage and current;
+- `46407–46412`: phase active power;
+- `46413–46418`: phase apparent power;
+- `46419–46424`: phase reactive power;
+- `46425–46433`: phase factor, angle and averages;
+- `46434–46442`: system totals and frequency;
+- `46443–46450`: energy; and
+- `46451`: an individually isolated, model-dependent register.
+
+All-zero, all-NaN, exception, stale, or plausible live values are each useful
+results—do not attempt to populate the registers.
 
 ## Stage 5: correlated plant capture
 
@@ -196,8 +198,7 @@ python3 tools/live_modbus_discovery.py probe solis \
 ```console
 python3 tools/live_modbus_discovery.py probe asw \
   --device /dev/serial/by-id/REPLACE_WITH_ASW_ADAPTER \
-  --baud REPLACE_WITH_WORKING_BAUD \
-  --extended \
+  --baud 9600 \
   --samples 60 \
   --interval 5 \
   --output discovery-output/asw-correlation.json
@@ -221,8 +222,8 @@ items.
 Return these files for analysis:
 
 1. the successful Solis baseline JSON;
-2. every ASW baseline attempt, including failed-baud results;
-3. the ASW extended JSON;
+2. the ASW baseline JSON;
+3. the split ASW CT-data JSON;
 4. both correlation JSON files; and
 5. the short timestamped observation note.
 
@@ -230,7 +231,7 @@ Before sharing, a quick review for accidental private notes is sufficient:
 
 ```console
 python3 -m json.tool discovery-output/solis-baseline.json | less
-python3 -m json.tool discovery-output/asw-extended.json | less
+python3 -m json.tool discovery-output/asw-ct-split.json | less
 ```
 
 Raw request and response frames are intentionally retained. They let us

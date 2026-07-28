@@ -23,7 +23,7 @@ import time
 from typing import Any, Iterable, Sequence
 
 
-TOOL_VERSION = "0.1"
+TOOL_VERSION = "0.2"
 READ_FUNCTIONS = frozenset((0x03, 0x04))
 BAUD_RATES = {
     2400: termios.B2400,
@@ -162,7 +162,7 @@ ASW_PROFILE = Profile(
     name="asw",
     description="Solplanet ASW12kH-T3 direct MONITOR-port read-only discovery",
     slave=3,
-    default_baud=38400,
+    default_baud=9600,
     request_gap=0.15,
     groups=(
         ReadGroup(
@@ -172,7 +172,7 @@ ASW_PROFILE = Profile(
             1000,
             2,
             (
-                f("device_type", 31001),
+                f("device_type", 31001, "string1"),
                 f("configured_modbus_address", 31002),
             ),
             note="The inverter serial-number range 31003-31018 is intentionally skipped.",
@@ -212,10 +212,14 @@ ASW_PROFILE = Profile(
             (
                 f("grid_rated_voltage", 31301, "u16", 0.1, "V"),
                 f("grid_rated_frequency", 31302, "u16", 0.01, "Hz"),
-                f("inverter_energy_today", 31303, "u32", 0.1, "kWh"),
-                f("inverter_energy_total", 31305, "u32", 0.1, "kWh"),
+                f("inverter_energy_today", 31303, "s32", 0.1, "kWh"),
+                f("inverter_energy_total", 31305, "s32", 0.1, "kWh"),
                 f("operating_hours_total", 31307, "u32", 1, "h"),
                 f("device_state", 31309),
+            ),
+            note=(
+                "The tested firmware encodes the two inverter-energy counters "
+                "as signed net energy despite V2.1.4 declaring U32."
             ),
         ),
         ReadGroup(
@@ -252,7 +256,7 @@ ASW_PROFILE = Profile(
                 f("battery_current", 31618, "s16", 0.1, "A"),
                 f("battery_power", 31619, "s32", 1, "W"),
                 f("battery_temperature", 31621, "s16", 0.1, "degC"),
-                f("battery_soc", 31622, "u16", 0.01, "%"),
+                f("battery_soc", 31622, "u16", 1, "%"),
                 f("battery_soh", 31623, "u16", 0.01, "%"),
                 f("battery_charge_current_limit", 31624, "u16", 0.1, "A"),
                 f("battery_discharge_current_limit", 31625, "u16", 0.1, "A"),
@@ -269,17 +273,22 @@ ASW_PROFILE = Profile(
             1662,
             19,
             (
-                f("grid_phase_1_active_power", 31663, "u32", 1, "W"),
+                f("grid_phase_1_active_power", 31663, "s32", 1, "W"),
                 f("grid_phase_1_reactive_power", 31665, "s32", 1, "var"),
-                f("grid_phase_2_active_power", 31667, "u32", 1, "W"),
+                f("grid_phase_2_active_power", 31667, "s32", 1, "W"),
                 f("grid_phase_2_reactive_power", 31669, "s32", 1, "var"),
-                f("grid_phase_3_active_power", 31671, "u32", 1, "W"),
+                f("grid_phase_3_active_power", 31671, "s32", 1, "W"),
                 f("grid_phase_3_reactive_power", 31673, "s32", 1, "var"),
                 f("grid_energy_charge_today", 31675, "u32", 0.1, "kWh"),
                 f("grid_energy_charge_total", 31677, "u32", 0.1, "kWh"),
                 f("battery_insulation_resistance", 31679, "u16", 1, "kohm"),
                 f("battery_charge_discharge_cycles", 31680),
                 f("environment_temperature", 31681, "u16", 0.1, "degC"),
+            ),
+            note=(
+                "The tested firmware encodes phase active power as signed S32 "
+                "despite V2.1.4 declaring U32. These values describe the "
+                "inverter grid-side AC port, not utility-meter phases."
             ),
         ),
         ReadGroup(
@@ -315,11 +324,11 @@ ASW_PROFILE = Profile(
             note="Read-only observation of configured state; no value is written.",
         ),
         ReadGroup(
-            "ct_data_experimental",
+            "ct_phase_voltage_current_experimental",
             0x03,
             46401,
             6400,
-            51,
+            6,
             (
                 f("ct_phase_1_voltage", 46401, "u16", 0.1, "V"),
                 f("ct_phase_2_voltage", 46402, "u16", 0.1, "V"),
@@ -327,19 +336,112 @@ ASW_PROFILE = Profile(
                 f("ct_phase_1_current", 46404, "u16", 0.1, "A"),
                 f("ct_phase_2_current", 46405, "u16", 0.1, "A"),
                 f("ct_phase_3_current", 46406, "u16", 0.1, "A"),
-                f("ct_phase_1_power", 46407, "s32", 1, "W"),
-                f("ct_phase_2_power", 46409, "s32", 1, "W"),
-                f("ct_phase_3_power", 46411, "s32", 1, "W"),
-                f("ct_total_system_power", 46434, "s32", 1, "W"),
-                f("ct_total_system_power_factor", 46440, "s16", 0.01),
-                f("ct_frequency", 46442, "u16", 0.01, "Hz"),
-                f("ct_import_energy", 46443, "u32", 1, "Wh"),
-                f("ct_export_energy", 46445, "u32", 1, "Wh"),
             ),
             extended=True,
             note=(
                 "V2.1.4 labels this RW 'CT Data'. This tool only reads it. "
-                "Its relationship to the terminal-8 Eastron meter is not yet verified."
+                "Its relationship to the terminal-8 Eastron meter is unverified."
+            ),
+        ),
+        ReadGroup(
+            "ct_phase_active_power_experimental",
+            0x03,
+            46407,
+            6406,
+            6,
+            (
+                f("ct_phase_1_power", 46407, "s32", 1, "W"),
+                f("ct_phase_2_power", 46409, "s32", 1, "W"),
+                f("ct_phase_3_power", 46411, "s32", 1, "W"),
+            ),
+            extended=True,
+        ),
+        ReadGroup(
+            "ct_phase_apparent_power_experimental",
+            0x03,
+            46413,
+            6412,
+            6,
+            (
+                f("ct_phase_1_apparent_power", 46413, "u32", 1, "VA"),
+                f("ct_phase_2_apparent_power", 46415, "u32", 1, "VA"),
+                f("ct_phase_3_apparent_power", 46417, "u32", 1, "VA"),
+            ),
+            extended=True,
+        ),
+        ReadGroup(
+            "ct_phase_reactive_power_experimental",
+            0x03,
+            46419,
+            6418,
+            6,
+            (
+                f("ct_phase_1_reactive_power", 46419, "s32", 1, "var"),
+                f("ct_phase_2_reactive_power", 46421, "s32", 1, "var"),
+                f("ct_phase_3_reactive_power", 46423, "s32", 1, "var"),
+            ),
+            extended=True,
+        ),
+        ReadGroup(
+            "ct_phase_factor_angle_experimental",
+            0x03,
+            46425,
+            6424,
+            9,
+            (
+                f("ct_phase_1_power_factor", 46425, "s16", 0.01),
+                f("ct_phase_2_power_factor", 46426, "s16", 0.01),
+                f("ct_phase_3_power_factor", 46427, "s16", 0.01),
+                f("ct_phase_1_angle", 46428, "u16", 1, "deg"),
+                f("ct_phase_2_angle", 46429, "u16", 1, "deg"),
+                f("ct_phase_3_angle", 46430, "u16", 1, "deg"),
+                f("ct_average_voltage", 46431, "u16", 0.1, "V"),
+                f("ct_average_current", 46432, "u16", 0.1, "A"),
+                f("ct_sum_line_currents", 46433, "u16", 0.1, "A"),
+            ),
+            extended=True,
+        ),
+        ReadGroup(
+            "ct_system_totals_experimental",
+            0x03,
+            46434,
+            6433,
+            9,
+            (
+                f("ct_total_system_power", 46434, "s32", 1, "W"),
+                f("ct_total_system_apparent_power", 46436, "u32", 1, "VA"),
+                f("ct_total_system_reactive_power", 46438, "s32", 1, "var"),
+                f("ct_total_system_power_factor", 46440, "s16", 0.01),
+                f("ct_total_system_angle", 46441, "u16", 1, "deg"),
+                f("ct_frequency", 46442, "u16", 0.01, "Hz"),
+            ),
+            extended=True,
+        ),
+        ReadGroup(
+            "ct_energy_experimental",
+            0x03,
+            46443,
+            6442,
+            8,
+            (
+                f("ct_import_energy", 46443, "u32", 1, "Wh"),
+                f("ct_export_energy", 46445, "u32", 1, "Wh"),
+                f("ct_import_reactive_energy", 46447, "u32", 1, "varh"),
+                f("ct_export_reactive_energy", 46449, "u32", 1, "varh"),
+            ),
+            extended=True,
+        ),
+        ReadGroup(
+            "ct_register_46451_experimental",
+            0x03,
+            46451,
+            6450,
+            1,
+            (f("ct_register_46451", 46451, "u16", 0.1, "V"),),
+            extended=True,
+            note=(
+                "V2.1.4 repeats 'Phase 1 line to neutral volts' at 46451 and "
+                "marks the CT block as supported only on some models."
             ),
         ),
     ),
@@ -450,8 +552,28 @@ def _field_width(kind: str) -> int:
 
 def _decode_string(words: Sequence[int]) -> str:
     raw = b"".join(word.to_bytes(2, "big") for word in words)
-    text = raw.rstrip(b"\x00\xff ").decode("ascii", errors="replace")
+    text = raw.strip(b"\x00\xff ").decode("ascii", errors="replace")
     return "".join(char if char.isprintable() else "?" for char in text)
+
+
+def _is_documented_nan(kind: str, words: Sequence[int]) -> bool:
+    if kind.startswith("string"):
+        return all(word == 0x0000 for word in words)
+    if kind in ("u16", "hex16"):
+        return list(words) == [0xFFFF]
+    if kind == "s16":
+        return list(words) == [0x8000]
+    if kind == "u32":
+        return list(words) == [0xFFFF, 0xFFFF]
+    if kind == "s32":
+        return list(words) == [0x8000, 0x0000]
+    return False
+
+
+def _scaled(value: int, scale: float) -> int | float:
+    if scale == 1:
+        return value
+    return round(value * scale, 9)
 
 
 def decode_fields(group: ReadGroup, registers: Sequence[int]) -> dict[str, Any]:
@@ -469,20 +591,23 @@ def decode_fields(group: ReadGroup, registers: Sequence[int]) -> dict[str, Any]:
             entry["error"] = "field falls outside returned register range"
             decoded[field.name] = entry
             continue
-        if all(word == 0xFFFF for word in words) and not field.kind.startswith("string"):
+        if _is_documented_nan(field.kind, words):
             entry["value"] = None
             entry["quality"] = "documented_nan"
         elif field.kind == "hex16":
             entry["value"] = f"0x{words[0]:04x}"
         elif field.kind == "u16":
-            entry["value"] = words[0] * field.scale
+            entry["value"] = _scaled(words[0], field.scale)
         elif field.kind == "s16":
-            entry["value"] = _signed(words[0], 16) * field.scale
+            entry["value"] = _scaled(_signed(words[0], 16), field.scale)
         elif field.kind == "u32":
-            entry["value"] = ((words[0] << 16) | words[1]) * field.scale
+            entry["value"] = _scaled(
+                (words[0] << 16) | words[1],
+                field.scale,
+            )
         elif field.kind == "s32":
             raw = (words[0] << 16) | words[1]
-            entry["value"] = _signed(raw, 32) * field.scale
+            entry["value"] = _scaled(_signed(raw, 32), field.scale)
         elif field.kind.startswith("string"):
             entry["value"] = _decode_string(words)
         else:
