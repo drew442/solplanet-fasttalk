@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+
+# Live plant captures may contain device identifiers and operational data.
+discovery-output/

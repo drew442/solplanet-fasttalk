@@ -233,6 +233,13 @@ or other private site information in an issue or capture.
 Development, testing, and contribution instructions will be added alongside the
 first implementation.
 
+## Live hardware discovery
+
+The repository includes a guarded, read-only Modbus RTU discovery utility for
+the initial Solis and Solplanet test hardware. See the
+[live system discovery runbook](docs/live-system-discovery.md) before using it.
+The runbook deliberately leaves the inverter-controlled Eastron bus untouched.
+
 ## Project status
 
 Design and initial development. Do not use this software to control production
