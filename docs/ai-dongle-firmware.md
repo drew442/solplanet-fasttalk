@@ -127,6 +127,28 @@ The three meter values are numeric. `meter_en` is the enable setting,
 the dongle's built-in meter decoder. This is the fastest way to test the
 slave-address hypothesis without probing every address.
 
+The live dongle returned:
+
+```text
+model       BA1300-30
+hardware    M11
+software    V610-09578-02.013
+meter_en    0
+meter_add   0
+meter_mod   0
+```
+
+The zero meter values show that the dongle's optional meter subsystem is
+disabled on this installation. The inverter can still report its internal
+smart-meter state because the ASW itself polls the Eastron attached to
+terminal 8; that is separate from the dongle's optional multi-inverter meter
+controller.
+
+The live software identity also does not match the analyzed image's
+`22602-005R` application. The local CGI structure is closely related, but
+UART routing and meter behavior recovered from `610-50017-05` must not be
+treated as proof of the behavior of `V610-09578-02.013`.
+
 `/paraget.cgi` is a logical parameter snapshot, not a byte-for-byte NVS
 backup. It does not include every setting stored by the dongle and the
 firmware exposes no dedicated configuration-export or restore handler.
@@ -170,15 +192,17 @@ total active power, but it remains an inference rather than a documented SEM3
 fact. The discovery profile includes this hypothesis only behind
 `--extended`.
 
-The slave-1 route did not respond, so the next live tests are:
+The slave-1 route did not respond. Subsequent bounded scans of both documented
+MONITOR/COM2 RS-485 pin pairs found only the ASW at slave 3:
 
-1. read `meter_add` from `/paraget.cgi`;
-2. run the bounded read-only MONITOR-bus address scan to distinguish the
-   known inverter at address 3 from any other responding slave; and
-3. repeat the recovered Eastron read only if either source identifies a
-   different plausible meter address.
+- pins 7–8: the Eastron-shaped read to slave 3 was silent, followed by a valid
+  ASW device-header response;
+- pins 1–2: slave 3 returned Modbus exception `0x02` to the Eastron-shaped
+  read; and
+- on both pin pairs, slaves 1–2 and 4–16 were silent.
 
-If no meter address responds on MONITOR, the working conclusion will be that
-terminal 8 is a separate electrical bus and the dongle has privileged access
-to it through the inverter connector or internal routing. At that point,
-passive capture becomes more useful than further active guesses.
+No meter address responds on MONITOR, and the live dongle is not configured
+to poll one. The working conclusion is that terminal 8 is a separate
+electrical bus polled internally by the ASW. Passive capture of that existing
+ASW–Eastron exchange is now more useful than further active MONITOR-port
+guesses.

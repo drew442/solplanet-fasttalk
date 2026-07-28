@@ -362,3 +362,83 @@ range until the safe CGI result and this first scan have been analysed.
 Return `asw-slave-scan-1-16.json`. If `meter_add` identifies an address outside
 1–16, test only that single address with equal start and end values rather
 than scanning the rest of the Modbus range.
+
+### Stage 7 results
+
+The live dongle reported:
+
+```text
+model       BA1300-30
+hardware    M11
+software    V610-09578-02.013
+meter_en    0
+meter_add   0
+meter_mod   0
+```
+
+This live firmware is not the `22602-005R` application in the analyzed
+`610-50017-05` image. More importantly, its optional dongle-level meter
+controller is disabled. The ASW's own terminal-8 meter polling remains active
+and is visible indirectly through the inverter's smart-meter registers.
+
+The two scan files show:
+
+| MONITOR pins | Responding slaves | Slave-3 response to offset 52 |
+| --- | --- | --- |
+| 7–8 | 3 only | No response; the subsequent ASW offset-1000 read succeeded |
+| 1–2 | 3 only | Modbus exception `0x02` (illegal data address) |
+
+Slaves 1–2 and 4–16 were silent on both pin pairs. The official ASW manual
+assigns both pins 1–2 and 7–8 as RS-485 A/B under MONITOR/COM2, and
+specifically describes pins 1–2 as the third-party monitor connection. It
+does not document a separate meter route on either pair, and the live results
+do not reveal one.
+See the communication-interface table in
+[`UM0035_ASW05-12KH-T2-T3_EN_V05_0225.pdf`](../reference/UM0035_ASW05-12KH-T2-T3_EN_V05_0225.pdf).
+
+Do not expand the address scan. There is no evidence that the terminal-8
+Eastron is addressable through MONITOR.
+
+One final MONITOR check is useful for daemon-interface selection rather than
+meter discovery: run the complete fixed ASW profile on the officially
+designated third-party pair, pins 1–2.
+
+```console
+python3 tools/live_modbus_discovery.py probe asw \
+  --device /dev/serial/by-id/REPLACE_WITH_ASW_ADAPTER \
+  --baud 9600 \
+  --output discovery-output/asw-pin1-2-baseline.json \
+  --verbose
+```
+
+If this matches the pins-7–8 baseline, use pins 1–2 as the daemon's preferred
+MONITOR connection and retain pins 7–8 for vendor-dongle compatibility.
+
+## Stage 8: passive terminal-8 capture
+
+The remaining direct discovery method is a parallel, receive-only tap on the
+existing ASW–Eastron terminal-8 RS-485 pair. It must add no termination or
+bias, must never enable a transmitter, and must leave the inverter and meter
+as the only active bus participants.
+
+One purpose-built candidate to investigate is the
+[RSLogger 485](https://www.rslogger.com/en/rslogger-hardware-serial-rs232-logger-recorder-serialghost/rslogger-485-dual-channel-rs485-data-logger).
+Its manufacturer describes both RS-485 channels as passive receive-only
+inputs, states that they do not drive or modify the bus, provides functional
+galvanic isolation, and supports both raw and decoded Modbus RTU recording. At
+the time of investigation the manufacturer's store listed it as out of stock.
+
+Before purchasing or attaching any logger, obtain written confirmation of:
+
+1. receiver input impedance or RS-485 unit-load rating;
+2. no fitted or automatically enabled 120-ohm termination;
+3. no pull-up/pull-down/failsafe bias applied to A/B;
+4. driver-disable being enforced in hardware, not merely by software; and
+5. whether isolated RS-485 reference ground should remain disconnected for a
+   two-wire parallel tap.
+
+Capture raw data as well as any built-in Modbus decoding. The raw bytes and
+inter-frame timing are required to validate CRCs and recover undocumented
+requests. A few minutes covering ordinary import/export changes should reveal
+the meter slave address, function codes, register ranges, and whether the ASW
+polls a second SEM3 channel.
