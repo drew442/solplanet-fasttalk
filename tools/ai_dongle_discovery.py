@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import json
 from pathlib import Path
+import ssl
 import sys
 from typing import Any, Iterable
 import urllib.error
@@ -14,7 +15,7 @@ import urllib.parse
 import urllib.request
 
 
-TOOL_VERSION = "0.1"
+TOOL_VERSION = "0.2"
 ENDPOINT_PATH = "/paraget.cgi"
 MAX_RESPONSE_BYTES = 1024 * 1024
 METER_FIELDS = ("meter_en", "meter_add", "meter_mod")
@@ -51,10 +52,10 @@ def utc_now() -> str:
 def endpoint_url(base_url: str) -> str:
     candidate = base_url.strip()
     if "://" not in candidate:
-        candidate = "http://" + candidate
+        candidate = "https://" + candidate
     parsed = urllib.parse.urlsplit(candidate)
-    if parsed.scheme not in ("http", "https"):
-        raise DongleDiscoveryError("the base URL must use http or https")
+    if parsed.scheme != "https":
+        raise DongleDiscoveryError("the Ai dongle base URL must use https")
     if not parsed.hostname:
         raise DongleDiscoveryError("the base URL must include a host or IP address")
     if parsed.username is not None or parsed.password is not None:
@@ -70,6 +71,9 @@ def endpoint_url(base_url: str) -> str:
 
 def fetch_parameters(base_url: str, timeout: float) -> dict[str, Any]:
     url = endpoint_url(base_url)
+    tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    tls_context.check_hostname = False
+    tls_context.verify_mode = ssl.CERT_NONE
     request = urllib.request.Request(
         url,
         method="GET",
@@ -79,7 +83,11 @@ def fetch_parameters(base_url: str, timeout: float) -> dict[str, Any]:
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(
+            request,
+            timeout=timeout,
+            context=tls_context,
+        ) as response:
             body = response.read(MAX_RESPONSE_BYTES + 1)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise DongleDiscoveryError(f"GET {ENDPOINT_PATH} failed: {exc}") from exc
@@ -117,6 +125,11 @@ def make_safe_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         "retrieved_at_utc": utc_now(),
         "source_endpoint": ENDPOINT_PATH,
         "http_method": "GET",
+        "transport": {
+            "scheme": "https",
+            "certificate_verification": False,
+            "scope": "this request only",
+        },
         "meter_configuration": meter,
         "device_summary": device,
         "response_field_names": sorted(str(key) for key in payload),
@@ -148,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--base-url",
         required=True,
-        help="Ai dongle base URL or IP, for example http://192.0.2.10",
+        help="Ai dongle HTTPS base URL or IP, for example 192.0.2.10",
     )
     parser.add_argument(
         "--timeout",

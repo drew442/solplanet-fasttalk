@@ -135,9 +135,14 @@ credentials. The repository tool saves only a privacy-safe subset:
 
 ```console
 python3 tools/ai_dongle_discovery.py \
-  --base-url http://REPLACE_WITH_AI_DONGLE_IP \
+  --base-url https://REPLACE_WITH_AI_DONGLE_IP \
   --output discovery-output/ai-dongle-parameters.json
 ```
+
+The live dongle requires HTTPS but presents a certificate that cannot be
+validated normally. The collector disables certificate and hostname
+verification only for this one fixed local request. It does not modify
+Python's global TLS settings.
 
 The firmware also registers read handlers such as `/ifconfig.cgi`,
 `/wlanget.cgi`, `/getdev.cgi`, and `/getdevdata.cgi`. The network handlers may

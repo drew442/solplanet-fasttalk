@@ -313,13 +313,16 @@ response or the sensitive values:
 
 ```console
 python3 tools/ai_dongle_discovery.py \
-  --base-url http://REPLACE_WITH_AI_DONGLE_IP \
+  --base-url https://REPLACE_WITH_AI_DONGLE_IP \
   --output discovery-output/ai-dongle-parameters.json
 ```
 
-Use the Ai dongle's current LAN address. Supplying an IP without `http://` is
-also accepted. The request is read-only and fixed to `/paraget.cgi`; the tool
-cannot invoke any setter CGI. Return `ai-dongle-parameters.json`.
+Use the Ai dongle's current LAN address. Supplying an IP without a scheme is
+also accepted and defaults to `https://`. The dongle's certificate cannot be
+validated normally, so the collector disables certificate and hostname
+verification only for this request. The request is read-only and fixed to
+`/paraget.cgi`; the tool cannot invoke any setter CGI. Return
+`ai-dongle-parameters.json`.
 
 This endpoint is not a complete backup or restore facility. It is a
 human-readable snapshot of the dongle's main parameters. Do not manually
