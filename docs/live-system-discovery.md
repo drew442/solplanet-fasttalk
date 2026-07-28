@@ -3,8 +3,9 @@
 This runbook gathers read-only Modbus RTU evidence from the initial test plant:
 
 - Solis-10K through its dedicated Waveshare USB-RS485 adapter; and
-- Solplanet ASW12kH-T3 through MONITOR-port pins 7 and 8 and its dedicated
-  Waveshare USB-RS485 adapter.
+- Solplanet ASW12kH-T3 through the MONITOR port and its dedicated Waveshare
+  USB-RS485 adapter. Discovery began on pins 7–8; pins 1–2 are now the
+  preferred third-party connection.
 
 The baseline and CT-data stages do **not** query the Eastron meter directly.
 Stage 6 adds a narrowly scoped read-only meter-route hypothesis recovered from
@@ -411,8 +412,38 @@ python3 tools/live_modbus_discovery.py probe asw \
   --verbose
 ```
 
-If this matches the pins-7–8 baseline, use pins 1–2 as the daemon's preferred
-MONITOR connection and retain pins 7–8 for vendor-dongle compatibility.
+The returned `asw-pin1-2-baseline.json` has overall status `ok`. All nine
+normal profile groups succeeded, including both function-`0x04` input
+registers and function-`0x03` holding registers. The model, address, firmware,
+rated power and manufacturer match the pins-7–8 baseline; live power, energy
+and battery values changed only as expected with time. This confirms pins 1–2
+as the daemon's preferred MONITOR connection. Retain pins 7–8 for
+vendor-dongle compatibility.
+
+One targeted comparison remains useful. Run the current split CT profile once
+on pins 1–2:
+
+```console
+python3 tools/live_modbus_discovery.py probe asw \
+  --device /dev/serial/by-id/REPLACE_WITH_ASW_ADAPTER \
+  --baud 9600 \
+  --extended \
+  --output discovery-output/asw-pin1-2-ct-split.json \
+  --verbose
+```
+
+On pins 7–8, ranges `46401–46450` returned data and only the isolated register
+`46451` returned exception `0x02`. Repeating the split profile will establish
+whether pins 1–2 expose the same CT data and whether the different
+invalid-address behavior observed during the slave scan applies here.
+
+Do not repeat the old monolithic 51-register CT request or the 60-sample
+correlation capture merely to compare the pins: both used a superseded profile
+whose inclusion of unsupported register `46451` guaranteed exception `0x02`.
+Do not repeat the 19200/38400-baud probes. The pins-1–2 slave scan already
+repeated the exact slave-1 Eastron-signature request used by
+`asw-meter-tunnel`, and it was silent, so repeating that profile would add no
+evidence.
 
 ## Stage 8: passive terminal-8 capture
 
