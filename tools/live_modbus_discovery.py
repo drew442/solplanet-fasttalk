@@ -14,16 +14,18 @@ import datetime as dt
 import fcntl
 import glob
 import json
+import math
 import os
 from pathlib import Path
 import select
+import struct
 import sys
 import termios
 import time
 from typing import Any, Iterable, Sequence
 
 
-TOOL_VERSION = "0.2"
+TOOL_VERSION = "0.3"
 READ_FUNCTIONS = frozenset((0x03, 0x04))
 BAUD_RATES = {
     2400: termios.B2400,
@@ -447,7 +449,95 @@ ASW_PROFILE = Profile(
     ),
 )
 
-PROFILES = {profile.name: profile for profile in (SOLIS_PROFILE, ASW_PROFILE)}
+EASTRON_TUNNEL_PROFILE = Profile(
+    name="asw-meter-tunnel",
+    description=(
+        "Read-only Eastron smart-meter probe through the Solplanet "
+        "ASW MONITOR-port transparent Modbus route"
+    ),
+    slave=1,
+    default_baud=9600,
+    request_gap=0.20,
+    groups=(
+        ReadGroup(
+            "channel_1_total_active_power",
+            0x04,
+            30053,
+            52,
+            2,
+            (f("channel_1_total_active_power", 30053, "float32", 1, "W"),),
+            note=(
+                "This exact function/address/count combination was recovered "
+                "from the 610-50017-05 Ai dongle firmware."
+            ),
+        ),
+        ReadGroup(
+            "channel_1_phase_active_power",
+            0x04,
+            30013,
+            12,
+            6,
+            (
+                f("channel_1_phase_1_active_power", 30013, "float32", 1, "W"),
+                f("channel_1_phase_2_active_power", 30015, "float32", 1, "W"),
+                f("channel_1_phase_3_active_power", 30017, "float32", 1, "W"),
+            ),
+            note=(
+                "The dongle's full three-phase poll starts at this address; "
+                "this probe requests only the three active-power values."
+            ),
+        ),
+        ReadGroup(
+            "channel_1_frequency_and_active_energy",
+            0x04,
+            30071,
+            70,
+            6,
+            (
+                f("channel_1_frequency", 30071, "float32", 1, "Hz"),
+                f("channel_1_import_active_energy", 30073, "float32", 1, "kWh"),
+                f("channel_1_export_active_energy", 30075, "float32", 1, "kWh"),
+            ),
+        ),
+        ReadGroup(
+            "channel_2_segmented_total_active_power_candidate",
+            0x04,
+            33053,
+            3052,
+            2,
+            (f("channel_2_total_active_power_candidate", 33053, "float32", 1, "W"),),
+            extended=True,
+            note=(
+                "Experimental read-only hypothesis: other Eastron "
+                "multi-channel meters map channel 2 to the channel-1 register "
+                "map plus 3000. No SEM3-M-2L protocol document has yet "
+                "confirmed this address."
+            ),
+        ),
+        ReadGroup(
+            "channel_2_segmented_phase_active_power_candidate",
+            0x04,
+            33013,
+            3012,
+            6,
+            (
+                f("channel_2_phase_1_active_power_candidate", 33013, "float32", 1, "W"),
+                f("channel_2_phase_2_active_power_candidate", 33015, "float32", 1, "W"),
+                f("channel_2_phase_3_active_power_candidate", 33017, "float32", 1, "W"),
+            ),
+            extended=True,
+            note=(
+                "Companion to the channel-2 total-power hypothesis. The "
+                "request remains function 0x04 and cannot change meter state."
+            ),
+        ),
+    ),
+)
+
+PROFILES = {
+    profile.name: profile
+    for profile in (SOLIS_PROFILE, ASW_PROFILE, EASTRON_TUNNEL_PROFILE)
+}
 
 
 def utc_now() -> str:
@@ -543,7 +633,7 @@ def _signed(value: int, bits: int) -> int:
 def _field_width(kind: str) -> int:
     if kind in ("u16", "s16", "hex16"):
         return 1
-    if kind in ("u32", "s32"):
+    if kind in ("u32", "s32", "float32"):
         return 2
     if kind.startswith("string"):
         return int(kind.removeprefix("string"))
@@ -567,6 +657,8 @@ def _is_documented_nan(kind: str, words: Sequence[int]) -> bool:
         return list(words) == [0xFFFF, 0xFFFF]
     if kind == "s32":
         return list(words) == [0x8000, 0x0000]
+    if kind == "float32":
+        return list(words) in ([0xFFFF, 0xFFFF], [0x7FC0, 0x0000])
     return False
 
 
@@ -608,6 +700,16 @@ def decode_fields(group: ReadGroup, registers: Sequence[int]) -> dict[str, Any]:
         elif field.kind == "s32":
             raw = (words[0] << 16) | words[1]
             entry["value"] = _scaled(_signed(raw, 32), field.scale)
+        elif field.kind == "float32":
+            value = struct.unpack(
+                ">f",
+                struct.pack(">HH", words[0], words[1]),
+            )[0]
+            if math.isfinite(value):
+                entry["value"] = round(value * field.scale, 9)
+            else:
+                entry["value"] = None
+                entry["quality"] = "non_finite"
         elif field.kind.startswith("string"):
             entry["value"] = _decode_string(words)
         else:
@@ -916,7 +1018,10 @@ def command_probe(args: argparse.Namespace) -> int:
                     sample["reads"].append(read_result)
                     print_group_result(read_result, args.verbose)
                     if group_index == 0 and read_result["status"] == "error":
-                        print("  Stopping: the profile identity read did not succeed.")
+                        print(
+                            "  Stopping: the profile's first validation read "
+                            "did not succeed."
+                        )
                         break
                     if group_index + 1 < len(groups):
                         time.sleep(profile.request_gap)

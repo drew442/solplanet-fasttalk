@@ -6,8 +6,10 @@ This runbook gathers read-only Modbus RTU evidence from the initial test plant:
 - Solplanet ASW12kH-T3 through MONITOR-port pins 7 and 8 and its dedicated
   Waveshare USB-RS485 adapter.
 
-It does **not** query the Eastron meter directly. The meter must remain under
-the exclusive control of the ASW inverter while following this runbook.
+The baseline and CT-data stages do **not** query the Eastron meter directly.
+Stage 6 adds a narrowly scoped read-only meter query through a transparent
+route recovered from the Ai dongle firmware. It uses the existing MONITOR-port
+connection and does not require touching the live terminal-8 wiring.
 
 ## Safety properties
 
@@ -22,7 +24,7 @@ deliberately narrow protocol surface:
 - the ASW inverter serial-number range `31003`–`31018` is not queried;
 - the experimental ASW `CT Data` ranges are disabled unless `--extended` is
   supplied; and
-- the first identity read must succeed before the rest of a profile is sent.
+- the first validation read must succeed before the rest of a profile is sent.
 
 Reading an RW holding register with function `0x03` does not write it. The ASW
 smart-meter and control-state groups use `0x03` only to observe their current
@@ -30,8 +32,9 @@ values.
 
 Do not run this tool while another process is using the same USB adapter. Do
 not connect either Waveshare adapter to the live ASW–Eastron terminal-8 bus.
-Two active Modbus masters on that bus could collide and interfere with export
-control.
+Two physical masters on that bus could collide and interfere with export
+control. The meter-tunnel profile instead sends the same bounded read frames
+used by the Ai dongle through the existing MONITOR-port adapter.
 
 ## Requirements
 
@@ -248,5 +251,51 @@ The returned data will determine whether:
    interface; or
 4. a passive, receive-only RS485 capture of the ASW–Eastron bus is necessary.
 
-Direct Eastron queries are deliberately deferred until these alternatives have
-been exhausted.
+The original work deliberately deferred direct Eastron queries until these
+alternatives had been exhausted. The Ai-dongle analysis below now provides a
+specific, bounded route to test.
+
+## Stage 6: Ai-dongle meter route
+
+Static analysis of firmware `610-50017-05` recovered the Ai dongle's meter
+poll. It sends an ordinary Eastron Modbus RTU function-`0x04` frame on its
+inverter UART and receives an ordinary meter response. See
+[`ai-dongle-firmware.md`](ai-dongle-firmware.md) for the evidence.
+
+First reproduce only the dongle's confirmed channel-1 addresses:
+
+```console
+python3 tools/live_modbus_discovery.py probe asw-meter-tunnel \
+  --device /dev/serial/by-id/REPLACE_WITH_ASW_ADAPTER \
+  --baud 9600 \
+  --output discovery-output/asw-meter-tunnel.json \
+  --verbose
+```
+
+This profile uses meter slave address `1`, not inverter slave address `3`. Its
+first frame reads input-register offset `52`, count `2`, which is the exact
+fast total-active-power request recovered from the firmware. If that receives
+no response, the tool stops immediately.
+
+If the normal meter route succeeds, run one additional sample with the
+read-only channel-2 candidates enabled:
+
+```console
+python3 tools/live_modbus_discovery.py probe asw-meter-tunnel \
+  --device /dev/serial/by-id/REPLACE_WITH_ASW_ADAPTER \
+  --baud 9600 \
+  --extended \
+  --output discovery-output/asw-meter-tunnel-extended.json \
+  --verbose
+```
+
+The extended reads test input-register offsets `3052` and `3012`. This is a
+specific hypothesis based on the documented `+3000` channel segmentation used
+by other Eastron multi-channel meters; the available SEM3-M-2L manual does not
+publish its second-channel register map. These requests use function `0x04`
+only and cannot alter meter or inverter state.
+
+Return both JSON files. Do not try other slave IDs or register ranges yet. If
+channel 1 succeeds and the `+3000` candidates fail, the next controlled test
+will check the alternative Eastron dual-address mode at fixed slave address
+`2`.

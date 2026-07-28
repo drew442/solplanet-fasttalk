@@ -1,10 +1,12 @@
 import os
 import pty
+import struct
 import threading
 import unittest
 
 from tools.live_modbus_discovery import (
     ASW_PROFILE,
+    EASTRON_TUNNEL_PROFILE,
     READ_FUNCTIONS,
     SOLIS_PROFILE,
     SerialRTU,
@@ -94,6 +96,13 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(
             (ASW_PROFILE.slave, ASW_PROFILE.default_baud),
             (3, 9600),
+        )
+        self.assertEqual(
+            (
+                EASTRON_TUNNEL_PROFILE.slave,
+                EASTRON_TUNNEL_PROFILE.default_baud,
+            ),
+            (1, 9600),
         )
 
     def test_asw_profile_skips_inverter_serial_number(self) -> None:
@@ -194,8 +203,33 @@ class ProfileTests(unittest.TestCase):
         meter = decode_fields(groups["smart_meter_state"], meter_registers)
         self.assertIsNone(meter["smart_meter_target_power"]["value"])
 
+    def test_eastron_float_and_channel_2_candidate(self) -> None:
+        groups = {
+            group.name: group for group in EASTRON_TUNNEL_PROFILE.groups
+        }
+        words = struct.unpack(">HH", struct.pack(">f", -4321.25))
+        decoded = decode_fields(
+            groups["channel_1_total_active_power"],
+            words,
+        )
+        self.assertEqual(
+            decoded["channel_1_total_active_power"]["value"],
+            -4321.25,
+        )
+
+        candidate = groups[
+            "channel_2_segmented_total_active_power_candidate"
+        ]
+        self.assertTrue(candidate.extended)
+        self.assertEqual(candidate.pdu_start, 52 + 3000)
+        self.assertEqual(candidate.function, 0x04)
+
     def test_all_profile_operations_are_bounded_reads(self) -> None:
-        for profile in (SOLIS_PROFILE, ASW_PROFILE):
+        for profile in (
+            SOLIS_PROFILE,
+            ASW_PROFILE,
+            EASTRON_TUNNEL_PROFILE,
+        ):
             for group in profile.groups:
                 self.assertIn(group.function, READ_FUNCTIONS)
                 self.assertGreaterEqual(group.count, 1)
