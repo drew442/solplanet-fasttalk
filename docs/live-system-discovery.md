@@ -157,7 +157,7 @@ The discovery profile incorporates the observed behavior:
 - grid-side phase active power is signed; and
 - `0x8000`/`0x80000000` signed NaN values are reported as unavailable.
 
-## Stage 4: experimental ASW CT-data read
+## Stage 4: ASW mirrored meter/CT-data read
 
 Only after the normal ASW profile succeeds, repeat it once with the V2.1.4
 `CT Data` ranges enabled:
@@ -172,10 +172,9 @@ python3 tools/live_modbus_discovery.py probe asw \
 ```
 
 These registers are marked RW in the vendor document, but the tool only reads
-them with function `0x03`. Their relationship to the Eastron terminal-8 meter
-is unknown. The original single 51-register request returned exception `0x02`,
-which could have been caused by any one unsupported address. Version 0.2
-therefore uses eight semantic ranges:
+them with function `0x03`. The original single 51-register request returned
+exception `0x02`, which could have been caused by any one unsupported address.
+Version 0.2 therefore uses eight semantic ranges:
 
 - `46401–46406`: phase voltage and current;
 - `46407–46412`: phase active power;
@@ -186,8 +185,29 @@ therefore uses eight semantic ranges:
 - `46443–46450`: energy; and
 - `46451`: an individually isolated, model-dependent register.
 
-All-zero, all-NaN, exception, stale, or plausible live values are each useful
-results—do not attempt to populate the registers.
+Live captures on both MONITOR pin pairs established the support boundary:
+`46401–46450` can be read, while `46451` consistently returns exception
+`0x02`. More importantly, `46401–46412` contain live per-phase grid-meter
+voltage, current and active power. The phase active-power sum closely follows
+the normal smart-meter aggregate:
+
+| Capture | Phase-power sum | Smart-meter power | Difference |
+| --- | ---: | ---: | ---: |
+| Pins 7–8, importing | 7428 W | 7517 W | -89 W |
+| Pins 1–2, exporting | -2297 W | -2276 W | -21 W |
+
+The direction change and close agreement cannot come from the ASW's own AC
+port, which was approximately idle, or from terminal-10 CTs, which are not
+installed. These registers therefore mirror the terminal-8 Eastron's grid
+measurement through the ASW. Positive is observed during grid import and
+negative during export.
+
+The remaining fields are not all useful on this model. Apparent/reactive
+power and energy were zero; several factor/angle values were NaN or invalid;
+and the reported total system power did not track the live phase sum. Treat
+only the independently correlated fields as confirmed. There is still no
+evidence that this block exposes the Eastron's second, Solis-connected
+measurement channel. Do not attempt to populate any RW register.
 
 ## Stage 5: correlated plant capture
 
@@ -248,13 +268,18 @@ plausible decoded value without repeating the live test.
 
 ## What happens next
 
-The returned data will determine whether:
+The returned data establishes that:
 
-1. the ASW already exposes both useful Eastron measurement channels;
-2. plant state can be reconstructed from ASW grid data plus direct Solis data;
-3. the V2.1.4 `CT Data` range represents real measurements or an injection
-   interface; or
-4. a passive, receive-only RS485 capture of the ASW–Eastron bus is necessary.
+1. the ASW mirrors the Eastron grid channel's live per-phase measurements, but
+   no second-channel data has been identified;
+2. plant power flow can be reconstructed from ASW grid data plus direct Solis
+   data; and
+3. part of the V2.1.4 `CT Data` range represents real measurements, while
+   other fields are unsupported, invalid or not populated on this model.
+
+A passive, receive-only RS485 capture of the ASW–Eastron bus remains useful
+only to recover or rule out second-channel polling and to validate the
+terminal-8 protocol directly.
 
 The original work deliberately deferred direct Eastron queries until these
 alternatives had been exhausted. The Ai-dongle analysis below now provides a
@@ -420,8 +445,7 @@ and battery values changed only as expected with time. This confirms pins 1–2
 as the daemon's preferred MONITOR connection. Retain pins 7–8 for
 vendor-dongle compatibility.
 
-One targeted comparison remains useful. Run the current split CT profile once
-on pins 1–2:
+The split CT profile was also repeated on pins 1–2:
 
 ```console
 python3 tools/live_modbus_discovery.py probe asw \
@@ -432,10 +456,10 @@ python3 tools/live_modbus_discovery.py probe asw \
   --verbose
 ```
 
-On pins 7–8, ranges `46401–46450` returned data and only the isolated register
-`46451` returned exception `0x02`. Repeating the split profile will establish
-whether pins 1–2 expose the same CT data and whether the different
-invalid-address behavior observed during the slave scan applies here.
+The result matches pins 7–8: every range through `46450` responded and the
+isolated register `46451` returned exception `0x02`. The two MONITOR pin pairs
+therefore expose the same useful ASW register map. The earlier difference in
+how offset 52 was rejected does not reveal additional data on pins 1–2.
 
 Do not repeat the old monolithic 51-register CT request or the 60-sample
 correlation capture merely to compare the pins: both used a superseded profile
@@ -445,11 +469,12 @@ repeated the exact slave-1 Eastron-signature request used by
 `asw-meter-tunnel`, and it was silent, so repeating that profile would add no
 evidence.
 
-## Stage 8: passive terminal-8 capture
+## Stage 8: optional passive terminal-8 capture
 
-The remaining direct discovery method is a parallel, receive-only tap on the
-existing ASW–Eastron terminal-8 RS-485 pair. It must add no termination or
-bias, must never enable a transmitter, and must leave the inverter and meter
+If recovering the Eastron's second measurement channel remains desirable, the
+remaining direct discovery method is a parallel, receive-only tap on the
+existing ASW–Eastron terminal-8 RS-485 pair. It must add no termination, must
+never connect an additional transmitter, and must leave the inverter and meter
 as the only active bus participants.
 
 One purpose-built candidate to investigate is the
@@ -468,8 +493,64 @@ Before purchasing or attaching any logger, obtain written confirmation of:
 5. whether isolated RS-485 reference ground should remain disconnected for a
    two-wire parallel tap.
 
-Capture raw data as well as any built-in Modbus decoding. The raw bytes and
-inter-frame timing are required to validate CRCs and recover undocumented
-requests. A few minutes covering ordinary import/export changes should reveal
-the meter slave address, function codes, register ranges, and whether the ASW
-polls a second SEM3 channel.
+Capture raw data as well as any built-in Modbus decoding. The raw bytes are
+required to validate CRCs and recover undocumented requests. USB-chunk arrival
+times are useful supporting evidence but are not precise per-byte timestamps.
+A few minutes covering ordinary import/export changes should reveal the meter
+slave address, function codes, register ranges, and whether the ASW polls a
+second SEM3 channel.
+
+### SH-U11F supervised capture
+
+The available DSD Tech SH-U11F has separate RS-422 `RXD+`/`RXD-` and
+`TXD+`/`TXD-` terminals, so its receiver can be connected while its transmitter
+remains physically disconnected. With its termination jumper removed,
+resistance measurements were:
+
+| Measurement | Resistance |
+| --- | ---: |
+| `RXD+` to `RXD-` | 98.6 kΩ |
+| `RXD+` to isolated 5 V | 4.5 kΩ |
+| `RXD-` to isolated 5 V | 96.7 kΩ |
+| `RXD+` to isolated ground | 92.7 kΩ |
+| `RXD-` to isolated ground | 4.4 kΩ |
+
+This identifies a failsafe pull-up/pull-down network. It is not a strictly
+unbiased high-impedance tap, but its approximately 8.9-kΩ bias path is far
+lighter than a 120-Ω termination and is acceptable for a short, supervised
+capture on this otherwise lightly loaded bus. It is not approved here as a
+permanent tap.
+
+Connect only the terminal-8 pair to `RXD+`/`RXD-`. Leave the SH-U11F
+termination jumper removed and leave `TXD+(A+)`, `TXD-(B-)`, 5 V and ground
+disconnected. Keep the stub short. The conductor that is more positive during
+an idle interval belongs on `RXD+`; A/B labels are not consistent between all
+RS-485 vendors.
+
+[`tools/passive_modbus_capture.py`](../tools/passive_modbus_capture.py) opens
+the serial descriptor `O_RDONLY` and has no serial transmit operation. It
+records every received USB chunk and the complete raw stream, then performs
+offline CRC-based frame recovery. This makes frame recovery less dependent on
+the FTDI driver's USB latency.
+
+Start with a 60-second validation capture at the expected 9600-8-N-1:
+
+```console
+python3 tools/passive_modbus_capture.py \
+  --device /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG04Q3CR-if00-port0 \
+  --baud 9600 \
+  --duration 60 \
+  --output discovery-output/eastron-terminal8-sniff-9600.json
+```
+
+During this short capture, confirm that the ASW continues to report its smart
+meter online and that plant import/export control remains normal. Return the
+JSON before attempting another baud rate or a longer capture.
+
+- `ok` means at least one CRC-valid known-shape Modbus frame was recovered.
+- `raw_data_only` means bytes arrived but no frames passed CRC validation.
+  Disconnect the tap before changing polarity or other wiring.
+- `no_data` means no serial bytes arrived at 9600 baud.
+
+The JSON may contain raw device responses and plant operating data. Treat it
+like the other ignored files under `discovery-output/`.

@@ -25,7 +25,7 @@ import time
 from typing import Any, Iterable, Sequence
 
 
-TOOL_VERSION = "0.4"
+TOOL_VERSION = "0.5"
 READ_FUNCTIONS = frozenset((0x03, 0x04))
 BAUD_RATES = {
     2400: termios.B2400,
@@ -342,7 +342,9 @@ ASW_PROFILE = Profile(
             extended=True,
             note=(
                 "V2.1.4 labels this RW 'CT Data'. This tool only reads it. "
-                "Its relationship to the terminal-8 Eastron meter is unverified."
+                "Live import/export captures identify 46401-46412 as mirrored "
+                "terminal-8 grid-meter phase data; the second meter channel "
+                "has not been identified."
             ),
         ),
         ReadGroup(
