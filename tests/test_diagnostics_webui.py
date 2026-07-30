@@ -1,11 +1,24 @@
 import datetime as dt
 from importlib import resources
+import json
 import sqlite3
 from pathlib import Path
 import tempfile
+import threading
 import unittest
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
-from solplanet_fasttalk.config import ConfigError, load_config
+from solplanet_fasttalk.api import API
+from solplanet_fasttalk.config import (
+    APIConfig,
+    ASWConfig,
+    ConfigError,
+    DaemonConfig,
+    EastronConfig,
+    load_config,
+)
+from solplanet_fasttalk.model import PlantState
 from solplanet_fasttalk.storage import HistoryReader, initialize_database
 
 
@@ -111,6 +124,50 @@ enabled = false
             )
             with self.assertRaisesRegex(ConfigError, "at least 32"):
                 load_config(path)
+
+    def test_static_ui_loads_before_authenticated_diagnostics_api(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "history.sqlite3")
+            token_path = Path(directory) / "diagnostics.token"
+            token = "browser-test-token-" + "c" * 32
+            token_path.write_text(token, encoding="utf-8")
+            token_path.chmod(0o600)
+            initialize_database(database)
+            config = DaemonConfig(
+                database,
+                APIConfig("127.0.0.1", 0, str(token_path)),
+                EastronConfig(enabled=False),
+                ASWConfig(enabled=False),
+            )
+            try:
+                api = API(config, PlantState(), HistoryReader(database))
+            except PermissionError:
+                self.skipTest("local listening sockets are prohibited")
+            thread = threading.Thread(target=api.serve)
+            thread.start()
+            host, port = api.address
+            base = f"http://{host}:{port}"
+            try:
+                with urlopen(f"{base}/diagnostics/", timeout=2) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertIn(
+                        "default-src 'self'",
+                        response.headers["Content-Security-Policy"],
+                    )
+                with self.assertRaises(HTTPError) as denied:
+                    urlopen(f"{base}/v1/diagnostics", timeout=2)
+                self.assertEqual(denied.exception.code, 401)
+                request = Request(
+                    f"{base}/v1/diagnostics",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                with urlopen(request, timeout=2) as response:
+                    payload = json.load(response)
+                self.assertEqual(payload["devices"], [])
+                self.assertIsNone(payload["plan"])
+            finally:
+                api.close()
+                thread.join(2)
 
 
 class DiagnosticsAssetTests(unittest.TestCase):
