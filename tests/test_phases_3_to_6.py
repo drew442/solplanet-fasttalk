@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from solplanet_fasttalk.asw import POLL_GROUPS, decode_group as decode_asw
@@ -16,7 +17,11 @@ from solplanet_fasttalk.config import (
     TariffConfig,
     load_config,
 )
-from solplanet_fasttalk.forecast import ForecastStore, _endpoint
+from solplanet_fasttalk.forecast import (
+    ForecastSolarWorker,
+    ForecastStore,
+    _endpoint,
+)
 from solplanet_fasttalk.model import Measurement, PlantState
 from solplanet_fasttalk.optimisation import (
     ForecastSlot,
@@ -271,6 +276,63 @@ class Phase5Tests(unittest.TestCase):
         self.assertEqual(len(config.forecast_solar.planes), 2)
         self.assertEqual(config.forecast_solar.planes[0].peak_power_kw, 6.2)
         self.assertTrue(config.optimisation.enabled)
+
+    def test_forecast_persistence_failure_keeps_live_cache_available(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return None
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "result": {
+                            "watts": {"2026-06-01 12:00:00": 1234},
+                            "watt_hours_day": {"2026-06-01": 4321},
+                        }
+                    }
+                ).encode()
+
+        class FailingHistory:
+            def record_forecast(self, *_args, **_kwargs):
+                raise sqlite3.OperationalError("database is busy")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            key = root / "key"
+            location = root / "location.json"
+            cache = root / "cache.json"
+            key.write_text("0123456789ABCDEF", encoding="utf-8")
+            location.write_text(
+                json.dumps({"latitude": 0, "longitude": 0}),
+                encoding="utf-8",
+            )
+            config = ForecastSolarConfig(
+                enabled=True,
+                api_key_file=str(key),
+                location_file=str(location),
+                cache_file=str(cache),
+                planes=(ForecastPlane("east", 25, -90, 6.2),),
+            )
+            state = PlantState()
+            store = ForecastStore(config, "Australia/Sydney")
+            worker = ForecastSolarWorker(
+                config,
+                "Australia/Sydney",
+                store,
+                state,
+                FailingHistory(),
+            )
+            with patch(
+                "solplanet_fasttalk.forecast.urlopen",
+                return_value=Response(),
+            ):
+                worker._fetch()
+            self.assertEqual(store.snapshot()["status"], "ok")
+            self.assertEqual(worker.persistence_failures, 1)
+            self.assertTrue(cache.is_file())
 
 
 class Phase6Tests(unittest.TestCase):

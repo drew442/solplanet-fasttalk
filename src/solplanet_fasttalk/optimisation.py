@@ -332,9 +332,37 @@ class OptimisationWorker:
         self.runs = 0
 
     def run(self, stop: threading.Event) -> None:
+        self.state.update_health(
+            "optimisation",
+            status="starting",
+            mode="shadow",
+            control_commands_sent=0,
+        )
         while not stop.is_set():
-            self.plan_once()
-            stop.wait(self.config.interval_seconds)
+            plan = self.plan_once()
+            if plan["status"] == "no_action":
+                self.state.update_health(
+                    "optimisation",
+                    status="degraded",
+                    mode="shadow",
+                    reason=plan["reason"],
+                    plans_generated=self.runs,
+                    control_commands_sent=0,
+                )
+                delay = min(30, self.config.interval_seconds)
+            elif plan["status"] == "infeasible":
+                self.state.update_health(
+                    "optimisation",
+                    status="degraded",
+                    mode="shadow",
+                    reason="forecast exceeds controllable site constraints",
+                    plans_generated=self.runs,
+                    control_commands_sent=0,
+                )
+                delay = self.config.interval_seconds
+            else:
+                delay = self.config.interval_seconds
+            stop.wait(delay)
 
     def plan_once(self) -> dict[str, Any]:
         current = self.state.current()

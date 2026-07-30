@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -174,8 +175,14 @@ class ForecastSolarWorker:
         self.history = history
         self.requests = 0
         self.failures = 0
+        self.persistence_failures = 0
 
     def run(self, stop: threading.Event) -> None:
+        self.state.update_health(
+            "forecast_solar",
+            status="starting",
+            secret_in_main_config=False,
+        )
         self._load_cache()
         while not stop.is_set():
             try:
@@ -183,9 +190,14 @@ class ForecastSolarWorker:
                 self.store.update_actual(self.state)
                 self.state.update_health(
                     "forecast_solar",
-                    status=self.store.snapshot()["status"],
+                    status=(
+                        "degraded"
+                        if self.persistence_failures
+                        else self.store.snapshot()["status"]
+                    ),
                     successful_requests=self.requests,
                     failed_requests=self.failures,
+                    persistence_failures=self.persistence_failures,
                     secret_in_main_config=False,
                 )
                 delay = self.config.refresh_interval_seconds
@@ -203,6 +215,7 @@ class ForecastSolarWorker:
                     error="forecast refresh failed; cached data retained",
                     successful_requests=self.requests,
                     failed_requests=self.failures,
+                    persistence_failures=self.persistence_failures,
                     secret_in_main_config=False,
                 )
                 delay = self.config.retry_interval_seconds
@@ -245,17 +258,20 @@ class ForecastSolarWorker:
         }
         self.store.replace(payload, cached=False)
         if self.history is not None:
-            self.history.record_forecast(
-                "forecast.solar",
-                payload["fetched_at"],
-                points,
-                {
-                    "plane_names": [
-                        plane.name for plane in self.config.planes
-                    ],
-                    "scope": "combined",
-                },
-            )
+            try:
+                self.history.record_forecast(
+                    "forecast.solar",
+                    payload["fetched_at"],
+                    points,
+                    {
+                        "plane_names": [
+                            plane.name for plane in self.config.planes
+                        ],
+                        "scope": "combined",
+                    },
+                )
+            except sqlite3.Error:
+                self.persistence_failures += 1
         self._save_cache(payload)
         self.requests += 1
 
