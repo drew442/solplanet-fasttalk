@@ -264,6 +264,69 @@ class HistoryReader:
             for row in rows
         ]
 
+    def series(
+        self,
+        name: str,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        bucket_seconds: int = 300,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Return graph-ready averages without transferring raw high-rate data."""
+
+        if not 10 <= bucket_seconds <= 86400:
+            raise ValueError("bucket_seconds must be between 10 and 86400")
+        clauses = ["name = ?", "value_num IS NOT NULL"]
+        values: list[Any] = [name]
+        if since:
+            clauses.append("observed_at >= ?")
+            values.append(since)
+        if until:
+            clauses.append("observed_at <= ?")
+            values.append(until)
+        query_limit = max(1, min(limit, 10000))
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    CAST(strftime('%s', observed_at) AS INTEGER) / ? AS bucket,
+                    AVG(value_num), MIN(value_num), MAX(value_num), COUNT(*),
+                    MAX(unit),
+                    CASE WHEN MIN(quality) = 'good' AND MAX(quality) = 'good'
+                         THEN 'good' ELSE 'mixed' END,
+                    MAX(source), MAX(authority)
+                FROM measurements
+                WHERE {' AND '.join(clauses)}
+                GROUP BY bucket
+                ORDER BY bucket DESC
+                LIMIT ?
+                """,
+                [bucket_seconds, *values, query_limit],
+            ).fetchall()
+        return [
+            {
+                "observed_at": dt.datetime.fromtimestamp(
+                    int(row[0]) * bucket_seconds,
+                    tz=dt.timezone.utc,
+                ).isoformat(),
+                "name": name,
+                "value": row[1],
+                "unit": row[5],
+                "quality": row[6],
+                "source": row[7],
+                "authority": row[8],
+                "access_mode": "time_bucket",
+                "metadata": {
+                    "bucket_seconds": bucket_seconds,
+                    "samples": row[4],
+                    "minimum": row[2],
+                    "maximum": row[3],
+                },
+            }
+            for row in rows
+        ]
+
     def counter_baselines(self) -> dict[str, dict[str, Any]]:
         with sqlite3.connect(self.path) as connection:
             rows = connection.execute(

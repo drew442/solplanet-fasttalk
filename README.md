@@ -52,7 +52,7 @@ The daemon will not initially provide:
 
 - a mobile application;
 - a hosted cloud monitoring platform;
-- a replacement user interface for every deployment; or
+- a full plant-configuration or control interface; or
 - support for unrelated home-automation devices.
 
 Those capabilities can be built separately using the daemon's API.
@@ -210,7 +210,10 @@ The implemented local API currently includes plant state, current/raw/rollup
 history, devices, capabilities, health, events, server-sent events, the
 pre-July 2026 ZEROHERO tariff, two-plane Forecast.Solar output,
 forecast-versus-actual history, shadow plans and Prometheus-format service
-metrics. See [phases 3–6](docs/phases-3-to-6.md) for exact behaviour.
+metrics. A responsive, read-only [diagnostics web UI](docs/diagnostics-webui.md)
+shows current and historical plant flow, forecasts, recommendations and the
+evidence behind the optimiser's decisions. See
+[phases 3–6](docs/phases-3-to-6.md) for exact daemon behaviour.
 
 ## Reliability and security
 
@@ -243,9 +246,10 @@ The delivery status is:
    implemented.
 5. Phase 6: constrained self-consumption/arbitrage planning in shadow mode —
    implemented.
-6. Phase 7: separately approved, bounded ASW control — not started.
-7. Phase 8: production packaging, authentication and operational hardening —
-   not complete.
+6. Read-only diagnostics UI and authenticated opt-in LAN access — implemented.
+7. Phase 7: separately approved, bounded ASW control — not started.
+8. Phase 8: production packaging and remaining operational hardening — not
+   complete.
 
 Compatibility will be tracked by exact inverter, battery, firmware, connection
 method, and tested feature set rather than by broad product-family claims.
@@ -286,13 +290,14 @@ a second Modbus master.
 
 ## Project status
 
-The first read-only daemon milestone is implemented: passive Eastron
-grid/external-PV telemetry, direct read-only ASW inverter/battery telemetry,
-measurement freshness, derived plant flow, SQLite history, health reporting
-and a local API. Its first combined HAOS live run completed without disrupting
-the ASW, either meter, import/export behaviour or the native Solplanet app.
-Control, tariff optimisation, extended soak testing and production release
-hardening remain future milestones.
+The daemon is implemented through phase 6: passive Eastron grid/external-PV
+telemetry, direct read-only ASW inverter/battery telemetry, measurement
+freshness, derived plant flow, SQLite history, optional Solis diagnostics,
+tariffs, PV forecasting, shadow optimisation, a local API and a diagnostics
+web UI. Live HAOS canaries completed without disrupting the ASW, either meter,
+import/export behaviour or the native Solplanet app. Hardware control,
+extended soak testing and production release hardening remain future
+milestones.
 
 Do not use this software to control production equipment until the relevant
 hardware and safety paths are explicitly marked as tested.
@@ -327,8 +332,11 @@ solplanet-fasttalk run --config /etc/solplanet-fasttalk.toml
 ```
 
 Review the serial by-ID paths and sign multipliers before starting. The API
-defaults to `127.0.0.1:8765` and is intentionally not authenticated in this
-milestone, so do not expose it on another interface.
+defaults to `127.0.0.1:8765`. Open the diagnostics UI at
+<http://127.0.0.1:8765/diagnostics/>. A non-loopback bind fails unless a
+private bearer-token file is configured; see the
+[diagnostics web UI guide](docs/diagnostics-webui.md) before enabling LAN
+access.
 
 Useful read-only endpoints include:
 
@@ -336,6 +344,7 @@ Useful read-only endpoints include:
 GET /v1/plant
 GET /v1/measurements/current
 GET /v1/measurements/history?name=grid.active_power
+GET /v1/diagnostics
 GET /v1/devices
 GET /v1/health
 GET /v1/events

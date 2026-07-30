@@ -17,6 +17,7 @@ class ConfigError(ValueError):
 class APIConfig:
     host: str = "127.0.0.1"
     port: int = 8765
+    auth_token_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -199,10 +200,26 @@ def load_config(path: str | os.PathLike[str]) -> DaemonConfig:
 def validate_config(config: DaemonConfig) -> None:
     if not 1 <= config.api.port <= 65535:
         raise ConfigError("api.port must be between 1 and 65535")
-    if config.api.host not in ("127.0.0.1", "localhost"):
+    loopback = config.api.host in ("127.0.0.1", "localhost", "::1")
+    if not loopback and not config.api.auth_token_file:
         raise ConfigError(
-            "the unauthenticated milestone API must bind to loopback"
+            "a non-loopback API bind requires api.auth_token_file"
         )
+    if config.api.auth_token_file:
+        token_path = Path(config.api.auth_token_file)
+        try:
+            mode = token_path.stat().st_mode & 0o777
+            token = token_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ConfigError("cannot read api.auth_token_file") from exc
+        if mode & 0o077:
+            raise ConfigError(
+                "api.auth_token_file must have mode 0600 or stricter"
+            )
+        if len(token) < 32 or any(character.isspace() for character in token):
+            raise ConfigError(
+                "API bearer token must contain at least 32 non-whitespace characters"
+            )
     devices: list[tuple[str, str]] = []
     for name, enabled, device, baud, slave in (
         (

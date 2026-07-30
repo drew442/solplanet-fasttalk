@@ -1,0 +1,1 @@
+"""Packaged diagnostics web interface."""

@@ -26,6 +26,9 @@ baselines.
 
 History accepts `resolution=raw`, `resolution=hourly` or `resolution=daily`.
 Service metrics are exposed in Prometheus text format at `/metrics`.
+The diagnostics UI can instead request bounded time buckets from 10 seconds to
+one day, allowing useful phone and desktop graphs without transferring raw
+high-rate history.
 
 ## Optional Solis plugin
 
@@ -139,8 +142,16 @@ GET /v1/tariffs/current
 GET /v1/forecasts/pv
 GET /v1/forecasts/pv?since=...&until=...
 GET /v1/plans/current
+GET /v1/diagnostics
+GET /v1/measurements/history?name=...&bucket_seconds=...
 GET /metrics
 ```
+
+The daemon serves the read-only diagnostics UI at `/diagnostics/`. It combines
+past measurements, live authoritative state, forecast plans and the optimiser's
+inputs/explanations. Loopback remains the default; an opt-in non-loopback bind
+requires a private bearer-token file. See
+[Diagnostics web UI](diagnostics-webui.md).
 
 All `POST` requests remain rejected. Phase 7 cannot begin until its separate
 hardware-specific write verification, risk assessment and explicit approval

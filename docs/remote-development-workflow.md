@@ -56,7 +56,9 @@ HAOS SSH add-on container
         └── read-functions-only Waveshare access to ASW MONITOR
 ```
 
-Do not expose SSH or the unauthenticated API directly to the public internet.
+Do not expose SSH or the API directly to the public internet. A bearer token
+is mandatory for non-loopback API binding but does not encrypt plain HTTP; use
+a private VPN or TLS reverse proxy outside a trusted isolated LAN.
 Do not grant access to the HAOS host shell, Docker socket or Supervisor token
 merely to run this daemon. Root inside the SSH add-on container is already
 more authority than the runtime needs and should not be expanded.

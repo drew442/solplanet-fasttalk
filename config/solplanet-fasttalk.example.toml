@@ -8,9 +8,14 @@ daily_retention_days = 3650
 maintenance_interval_seconds = 3600
 
 [api]
-# The first milestone has no API authentication, so retain loopback binding.
+# Loopback is the secure default. The diagnostics UI is then available at
+# http://127.0.0.1:8765/diagnostics/.
 host = "127.0.0.1"
 port = 8765
+# To opt into LAN access for a phone, bind a LAN interface or 0.0.0.0 and set
+# this to a target-only file containing at least 32 random characters. The file
+# must be mode 0600. Use a TLS reverse proxy on any untrusted network.
+auth_token_file = ""
 
 [eastron]
 enabled = true

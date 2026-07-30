@@ -12,7 +12,9 @@ control is enabled.
 > phase 7 has not begun.
 
 Implementation details and operator-facing behaviour are documented in
-[Phases 3–6 implementation](phases-3-to-6.md).
+[Phases 3–6 implementation](phases-3-to-6.md). The implemented
+[diagnostics web UI](diagnostics-webui.md) makes the phase-3–6 read-only data
+and optimiser workings directly usable from a phone or desktop browser.
 
 ## Confirmed initial plant
 
@@ -375,6 +377,7 @@ GET  /v1/health
 GET  /v1/tariffs/current
 GET  /v1/forecasts/pv
 GET  /v1/plans/current
+GET  /v1/diagnostics
 GET  /v1/events
 GET  /v1/stream
 ```

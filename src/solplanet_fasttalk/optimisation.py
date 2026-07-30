@@ -24,6 +24,9 @@ class ForecastSlot:
 class Recommendation:
     timestamp: str
     action: str
+    forecast_load_w: float
+    forecast_pv_w: float
+    baseline_grid_power_w: float
     battery_power_w: float
     expected_grid_power_w: float
     expected_soc_percent: float
@@ -268,6 +271,9 @@ def simulate_plan(
             Recommendation(
                 slot.timestamp.astimezone(dt.timezone.utc).isoformat(),
                 action,
+                round(slot.load_w, 3),
+                round(slot.pv_w, 3),
+                round(natural_grid, 3),
                 round(battery_power, 3),
                 round(expected_grid, 3),
                 round(stored_wh / capacity_wh * 100.0, 3),

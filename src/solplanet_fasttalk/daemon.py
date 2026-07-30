@@ -159,8 +159,9 @@ class Daemon:
                 "api",
                 status="ok",
                 bind=f"{host}:{port}",
-                authenticated=False,
+                authenticated=self.api.auth_token is not None,
                 control_available=False,
+                diagnostics_ui="/diagnostics/",
             )
             if self.forecast is not None:
                 self.forecast.update_actual(self.state)

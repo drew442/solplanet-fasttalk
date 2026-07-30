@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib import resources
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -33,6 +36,11 @@ class API:
         self.forecast = forecast
         self.plans = plans
         self.plugins = plugins
+        self.auth_token = (
+            self._read_auth_token(config.api.auth_token_file)
+            if config.api.auth_token_file
+            else None
+        )
         self.server = ThreadingHTTPServer(
             (config.api.host, config.api.port),
             self._handler(),
@@ -55,12 +63,40 @@ class API:
         api = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "solplanet-fasttalk/0.2"
+            server_version = "solplanet-fasttalk/0.3"
 
             def do_GET(self) -> None:
                 parsed = urlparse(self.path)
                 query = parse_qs(parsed.query)
                 try:
+                    if parsed.path == "/diagnostics":
+                        self._redirect("/diagnostics/")
+                        return
+                    if parsed.path == "/diagnostics/":
+                        self._static("index.html", "text/html; charset=utf-8")
+                        return
+                    if parsed.path == "/diagnostics/app.css":
+                        self._static("app.css", "text/css; charset=utf-8")
+                        return
+                    if parsed.path == "/diagnostics/app.js":
+                        self._static(
+                            "app.js", "text/javascript; charset=utf-8"
+                        )
+                        return
+                    if parsed.path == "/diagnostics/config.json":
+                        self._json(
+                            {
+                                "authentication_required": (
+                                    api.auth_token is not None
+                                ),
+                                "api_base": "/v1",
+                                "poll_seconds": 5,
+                            }
+                        )
+                        return
+                    if not self._authorized():
+                        self._unauthorized()
+                        return
                     if parsed.path == "/":
                         self._json(
                             {
@@ -68,6 +104,7 @@ class API:
                                 "api_version": "v1",
                                 "control_available": False,
                                 "mode": "shadow",
+                                "diagnostics_ui": "/diagnostics/",
                             }
                         )
                     elif parsed.path == "/v1/plant":
@@ -82,18 +119,26 @@ class API:
                                 HTTPStatus.BAD_REQUEST,
                             )
                             return
-                        self._json(
-                            {
-                                "measurements": api.history.measurements(
-                                    name,
-                                    since=self._one(query, "since"),
-                                    until=self._one(query, "until"),
-                                    limit=self._limit(query, 1000),
-                                    resolution=self._one(query, "resolution")
-                                    or "raw",
-                                )
-                            }
+                        bucket = self._one(query, "bucket_seconds")
+                        measurements = (
+                            api.history.series(
+                                name,
+                                since=self._one(query, "since"),
+                                until=self._one(query, "until"),
+                                bucket_seconds=int(bucket),
+                                limit=self._limit(query, 1000),
+                            )
+                            if bucket is not None
+                            else api.history.measurements(
+                                name,
+                                since=self._one(query, "since"),
+                                until=self._one(query, "until"),
+                                limit=self._limit(query, 1000),
+                                resolution=self._one(query, "resolution")
+                                or "raw",
+                            )
                         )
+                        self._json({"measurements": measurements})
                     elif parsed.path == "/v1/devices":
                         self._json({"devices": api._devices()})
                     elif parsed.path == "/v1/capabilities":
@@ -121,6 +166,8 @@ class API:
                         self._json(payload)
                     elif parsed.path == "/v1/plans/current" and api.plans:
                         self._json(api.plans.snapshot())
+                    elif parsed.path == "/v1/diagnostics":
+                        self._json(api._diagnostics())
                     elif parsed.path == "/metrics":
                         self._metrics()
                     else:
@@ -129,6 +176,9 @@ class API:
                     self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
             def do_POST(self) -> None:
+                if not self._authorized():
+                    self._unauthorized()
+                    return
                 self._json(
                     {
                         "error": (
@@ -149,6 +199,68 @@ class API:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def _static(self, name: str, content_type: str) -> None:
+                try:
+                    payload = (
+                        resources.files("solplanet_fasttalk.webui")
+                        .joinpath(name)
+                        .read_bytes()
+                    )
+                except (FileNotFoundError, ModuleNotFoundError):
+                    self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header(
+                    "Cache-Control",
+                    "no-cache" if name == "index.html" else "public, max-age=300",
+                )
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("X-Frame-Options", "DENY")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header(
+                    "Content-Security-Policy",
+                    (
+                        "default-src 'self'; connect-src 'self'; "
+                        "img-src 'self' data:; style-src 'self'; "
+                        "script-src 'self'; frame-ancestors 'none'; "
+                        "base-uri 'none'; form-action 'self'"
+                    ),
+                )
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def _redirect(self, location: str) -> None:
+                self.send_response(HTTPStatus.PERMANENT_REDIRECT)
+                self.send_header("Location", location)
+                self.send_header("Content-Length", "0")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+
+            def _authorized(self) -> bool:
+                if api.auth_token is None:
+                    return True
+                scheme, _, token = self.headers.get(
+                    "Authorization", ""
+                ).partition(" ")
+                return (
+                    scheme.lower() == "bearer"
+                    and hmac.compare_digest(token, api.auth_token)
+                )
+
+            def _unauthorized(self) -> None:
+                payload = b'{"error":"authentication required"}'
+                self.send_response(HTTPStatus.UNAUTHORIZED)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("WWW-Authenticate", "Bearer")
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
                 self.wfile.write(payload)
 
@@ -226,6 +338,10 @@ class API:
                 return
 
         return Handler
+
+    @staticmethod
+    def _read_auth_token(path: str) -> str:
+        return Path(path).read_text(encoding="utf-8").strip()
 
     def _devices(self) -> list[dict[str, Any]]:
         health = self.state.health()["components"]
@@ -312,3 +428,16 @@ class API:
             ),
         }
         return {"capabilities": capabilities}
+
+    def _diagnostics(self) -> dict[str, Any]:
+        return {
+            "plant": self.state.plant(),
+            "measurements": self.state.current(),
+            "health": self.state.health(),
+            "devices": self._devices(),
+            "capabilities": self._capabilities()["capabilities"],
+            "tariff": self.tariff.current() if self.tariff else None,
+            "forecast": self.forecast.snapshot() if self.forecast else None,
+            "plan": self.plans.snapshot() if self.plans else None,
+            "events": self.history.events(20),
+        }

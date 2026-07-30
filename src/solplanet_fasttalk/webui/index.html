@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#102420">
+  <title>Fasttalk · Plant diagnostics</title>
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to plant overview</a>
+
+  <aside class="sidebar" aria-label="Primary navigation">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 40 40" role="img">
+          <path d="M6 25 17 7l3 11h14L23 34l-3-12H6Z"></path>
+        </svg>
+      </div>
+      <div>
+        <strong>FASTTALK</strong>
+        <span>Plant intelligence</span>
+      </div>
+    </div>
+
+    <nav>
+      <a class="nav-link is-active" href="#now">
+        <span class="nav-index">01</span><span>Now</span>
+      </a>
+      <a class="nav-link" href="#history">
+        <span class="nav-index">02</span><span>History</span>
+      </a>
+      <a class="nav-link" href="#future">
+        <span class="nav-index">03</span><span>Forecast</span>
+      </a>
+      <a class="nav-link" href="#workings">
+        <span class="nav-index">04</span><span>Workings</span>
+      </a>
+      <a class="nav-link" href="#system">
+        <span class="nav-index">05</span><span>System</span>
+      </a>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div class="mode-lock">
+        <span class="status-dot status-dot--safe"></span>
+        <span><strong>Shadow mode</strong><small>No commands are sent</small></span>
+      </div>
+      <button id="authButton" class="text-button" type="button" hidden>
+        Change access token
+      </button>
+    </div>
+  </aside>
+
+  <main id="main">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">LOCAL ENERGY OPERATIONS</p>
+        <p id="localTime" class="local-time">Connecting…</p>
+      </div>
+      <div class="topbar-status">
+        <span id="refreshState" class="quiet">Waiting for daemon</span>
+        <span id="healthBadge" class="health-badge health-badge--starting">
+          <span class="status-dot"></span><span>Starting</span>
+        </span>
+      </div>
+    </header>
+
+    <section id="now" class="hero section-anchor">
+      <div class="hero-copy">
+        <p class="eyebrow">PAST <span>·</span> PRESENT <span>·</span> FUTURE</p>
+        <h1>Everything the plant knows,<br>in one clear timeline.</h1>
+        <p>
+          Authoritative measurements, what the optimiser would do, and the
+          evidence behind every recommendation.
+        </p>
+      </div>
+      <div class="live-stamp">
+        <span class="pulse" aria-hidden="true"></span>
+        <span><strong>Live plant data</strong><small id="lastUpdated">Not updated</small></span>
+      </div>
+    </section>
+
+    <section class="metric-grid" aria-label="Current plant summary">
+      <article class="metric-card metric-card--grid">
+        <div class="metric-head"><span>Grid</span><span id="gridDirection" class="metric-tag">—</span></div>
+        <strong id="gridPower" class="metric-value">—</strong>
+        <span id="gridSub" class="metric-sub">Waiting for meter</span>
+        <div class="sparkline" id="gridSpark" aria-hidden="true"></div>
+      </article>
+      <article class="metric-card metric-card--load">
+        <div class="metric-head"><span>Site consumption</span><span class="metric-tag">DERIVED</span></div>
+        <strong id="loadPower" class="metric-value">—</strong>
+        <span id="selfSufficiency" class="metric-sub">Self-sufficiency —</span>
+        <div class="sparkline" id="loadSpark" aria-hidden="true"></div>
+      </article>
+      <article class="metric-card metric-card--solar">
+        <div class="metric-head"><span>PV production</span><span class="metric-tag">AC</span></div>
+        <strong id="solarPower" class="metric-value">—</strong>
+        <span id="solarSplit" class="metric-sub">External + Solplanet</span>
+        <div class="sparkline" id="solarSpark" aria-hidden="true"></div>
+      </article>
+      <article class="metric-card metric-card--battery">
+        <div class="metric-head"><span>Battery</span><span id="batteryState" class="metric-tag">—</span></div>
+        <strong id="batterySoc" class="metric-value">—</strong>
+        <span id="batteryPower" class="metric-sub">Power —</span>
+        <div class="soc-track" aria-hidden="true"><span id="socFill"></span></div>
+      </article>
+    </section>
+
+    <section class="split-layout">
+      <article class="panel flow-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">PRESENT</p>
+            <h2>Live energy flow</h2>
+          </div>
+          <span id="flowQuality" class="quality-chip">Awaiting data</span>
+        </div>
+
+        <div class="energy-flow" aria-label="Current energy flow diagram">
+          <div class="flow-node flow-node--solar">
+            <span class="flow-icon" aria-hidden="true">☀</span>
+            <small>Production</small>
+            <strong id="flowSolar">—</strong>
+          </div>
+          <div class="flow-line flow-line--solar" aria-hidden="true"><i></i></div>
+
+          <div class="flow-node flow-node--grid">
+            <span class="flow-icon" aria-hidden="true">↔</span>
+            <small id="flowGridLabel">Grid</small>
+            <strong id="flowGrid">—</strong>
+          </div>
+          <div class="flow-line flow-line--grid" aria-hidden="true"><i></i></div>
+
+          <div class="flow-core">
+            <span class="house-icon" aria-hidden="true">⌂</span>
+            <small>Site load</small>
+            <strong id="flowLoad">—</strong>
+          </div>
+
+          <div class="flow-line flow-line--battery" aria-hidden="true"><i></i></div>
+          <div class="flow-node flow-node--battery">
+            <span class="flow-icon" aria-hidden="true">▰</span>
+            <small>Battery</small>
+            <strong id="flowBattery">—</strong>
+          </div>
+        </div>
+
+        <div class="flow-foot">
+          <div><span>Self-consumed now</span><strong id="selfConsumed">—</strong></div>
+          <div><span>Measurement authority</span><strong>Eastron meter</strong></div>
+        </div>
+      </article>
+
+      <article class="panel recommendation-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">WHAT FASTTALK WOULD DO</p>
+            <h2>Current recommendation</h2>
+          </div>
+          <span id="planStatus" class="quality-chip quality-chip--shadow">Shadow</span>
+        </div>
+
+        <div class="action-block">
+          <span id="actionIcon" class="action-icon" aria-hidden="true">—</span>
+          <div>
+            <small id="actionTime">Waiting for a plan</small>
+            <strong id="actionTitle">No recommendation yet</strong>
+            <p id="actionSummary">The optimiser is gathering fresh inputs.</p>
+          </div>
+        </div>
+
+        <div id="actionReasons" class="reason-list" aria-live="polite"></div>
+
+        <div class="recommendation-foot">
+          <div><span>Expected grid</span><strong id="expectedGrid">—</strong></div>
+          <div><span>Expected SOC</span><strong id="expectedSoc">—</strong></div>
+          <div><span>Estimated saving</span><strong id="estimatedSaving">—</strong></div>
+        </div>
+        <p class="safety-note">
+          Recommendation only. The daemon has no command execution capability.
+        </p>
+      </article>
+    </section>
+
+    <section id="history" class="panel chart-panel section-anchor">
+      <div class="panel-head panel-head--wrap">
+        <div>
+          <p class="eyebrow">PAST</p>
+          <h2>What happened</h2>
+          <p class="panel-intro">Power flow and battery state from authoritative history.</p>
+        </div>
+        <div class="range-control" role="group" aria-label="History range">
+          <button type="button" data-range="6h">6h</button>
+          <button type="button" data-range="24h" class="is-active">24h</button>
+          <button type="button" data-range="7d">7d</button>
+          <button type="button" data-range="30d">30d</button>
+        </div>
+      </div>
+
+      <div class="legend" aria-label="History chart legend">
+        <span><i class="legend-load"></i>Consumption</span>
+        <span><i class="legend-solar"></i>External PV</span>
+        <span><i class="legend-asw"></i>Solplanet AC</span>
+        <span><i class="legend-grid"></i>Grid (+ import / − export)</span>
+      </div>
+      <div class="chart-wrap">
+        <svg id="historyChart" class="line-chart" role="img" aria-label="Historical power chart"></svg>
+        <p id="historyEmpty" class="chart-empty" hidden>No history is available for this range.</p>
+      </div>
+
+      <div class="subchart-head">
+        <span>Battery state of charge</span><strong id="historySocLatest">—</strong>
+      </div>
+      <div class="chart-wrap chart-wrap--small">
+        <svg id="historySocChart" class="line-chart" role="img" aria-label="Historical battery state of charge"></svg>
+      </div>
+    </section>
+
+    <section id="future" class="panel chart-panel section-anchor">
+      <div class="panel-head panel-head--wrap">
+        <div>
+          <p class="eyebrow">FUTURE</p>
+          <h2>What is expected</h2>
+          <p class="panel-intro">PV and load forecast with the feasible shadow schedule applied.</p>
+        </div>
+        <div class="forecast-meta">
+          <span id="forecastStatus" class="quality-chip">Unavailable</span>
+          <small id="forecastAge">No provider data</small>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span><i class="legend-load"></i>Forecast consumption</span>
+        <span><i class="legend-solar"></i>Forecast PV</span>
+        <span><i class="legend-plan"></i>Expected grid</span>
+        <span><i class="legend-baseline"></i>Grid without schedule</span>
+      </div>
+      <div class="chart-wrap">
+        <svg id="futureChart" class="line-chart" role="img" aria-label="Forecast power and schedule chart"></svg>
+        <p id="futureEmpty" class="chart-empty" hidden>No feasible schedule is available.</p>
+      </div>
+
+      <div class="subchart-head">
+        <span>Forecast battery state of charge</span><strong id="futureSocEnd">—</strong>
+      </div>
+      <div class="chart-wrap chart-wrap--small">
+        <svg id="futureSocChart" class="line-chart" role="img" aria-label="Forecast battery state of charge"></svg>
+      </div>
+
+      <div class="schedule-head">
+        <div><p class="eyebrow">NEXT ACTIONS</p><h3>Recommendation schedule</h3></div>
+        <span id="scheduleCount" class="quiet">—</span>
+      </div>
+      <div id="schedule" class="schedule-list"></div>
+    </section>
+
+    <section id="workings" class="section-anchor workings-grid">
+      <article class="panel">
+        <div class="panel-head">
+          <div><p class="eyebrow">WORKINGS</p><h2>Decision pipeline</h2></div>
+          <span class="quality-chip quality-chip--shadow">Explainable</span>
+        </div>
+        <ol class="pipeline">
+          <li>
+            <span>1</span>
+            <div><strong>Observe</strong><p id="observeStep">Checking authoritative measurements…</p></div>
+          </li>
+          <li>
+            <span>2</span>
+            <div><strong>Forecast</strong><p id="forecastStep">Waiting for PV and load forecasts…</p></div>
+          </li>
+          <li>
+            <span>3</span>
+            <div><strong>Constrain</strong><p id="constraintStep">Checking BMS, SOC and site boundaries…</p></div>
+          </li>
+          <li>
+            <span>4</span>
+            <div><strong>Recommend</strong><p id="recommendStep">No executable control path is present.</p></div>
+          </li>
+        </ol>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div><p class="eyebrow">PLAN EVIDENCE</p><h2>Inputs and freshness</h2></div>
+          <span id="inputStatus" class="quality-chip">—</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Input</th><th>Value</th><th>Age</th><th>Source</th></tr></thead>
+            <tbody id="inputTable">
+              <tr><td colspan="4" class="quiet">Waiting for plan inputs…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel forecast-accuracy">
+        <div class="panel-head">
+          <div><p class="eyebrow">FORECAST CHECK</p><h2>Prediction versus actual</h2></div>
+          <span id="forecastQuality" class="quality-chip">—</span>
+        </div>
+        <div class="accuracy-numbers">
+          <div><span>Forecast now</span><strong id="forecastNow">—</strong></div>
+          <div><span>Actual now</span><strong id="actualNow">—</strong></div>
+          <div><span>Error</span><strong id="forecastError">—</strong></div>
+        </div>
+        <p id="forecastScope" class="panel-intro">Combined east/west PV forecast.</p>
+      </article>
+
+      <article class="panel tariff-card">
+        <div class="panel-head">
+          <div><p class="eyebrow">PRICE SIGNAL</p><h2>Tariff now</h2></div>
+          <span id="tariffPeriod" class="quality-chip">—</span>
+        </div>
+        <div class="tariff-numbers">
+          <div><span>Import</span><strong id="importPrice">—</strong></div>
+          <div><span>Export</span><strong id="exportPrice">—</strong></div>
+        </div>
+        <p id="tariffDetail" class="panel-intro">Waiting for the local tariff model.</p>
+      </article>
+    </section>
+
+    <section id="system" class="panel section-anchor">
+      <div class="panel-head panel-head--wrap">
+        <div>
+          <p class="eyebrow">SYSTEM</p>
+          <h2>Devices and daemon health</h2>
+          <p class="panel-intro">Every source, access mode and recent diagnostic event.</p>
+        </div>
+        <span id="systemSummary" class="quiet">—</span>
+      </div>
+      <div id="deviceGrid" class="device-grid"></div>
+      <div class="events-head"><h3>Recent events</h3><span class="quiet">Newest first</span></div>
+      <div id="eventList" class="event-list"></div>
+    </section>
+
+    <footer>
+      <span>solplanet-fasttalk diagnostics</span>
+      <span>Read-only · local-first · shadow mode</span>
+    </footer>
+  </main>
+
+  <dialog id="authDialog">
+    <form id="authForm" method="dialog">
+      <p class="eyebrow">SECURE LOCAL ACCESS</p>
+      <h2>Enter diagnostics token</h2>
+      <p>
+        This daemon requires a bearer token because it is listening beyond
+        loopback. The token stays in this browser tab.
+      </p>
+      <label for="authToken">Access token</label>
+      <input id="authToken" name="token" type="password" autocomplete="off" required>
+      <p id="authError" class="form-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="primary-button" type="submit">Open diagnostics</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
