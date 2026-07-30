@@ -144,6 +144,12 @@ class HistoryWriter:
                     if pending >= 100:
                         connection.commit()
                         pending = 0
+                        # Give forecast/event writers a bounded opportunity to
+                        # acquire SQLite's single WAL write lock. Without this
+                        # handoff a continuously populated measurement queue
+                        # can immediately begin another transaction and starve
+                        # lower-frequency writers.
+                        time.sleep(0.01)
                 except sqlite3.Error:
                     self.failures += 1
             connection.commit()
