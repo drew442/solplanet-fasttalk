@@ -4,9 +4,10 @@ Fast, local-first monitoring and control for Solplanet hybrid inverters and
 energy storage systems.
 
 > [!IMPORTANT]
-> This project is at an early stage. The architecture and interfaces described
-> below are goals, not a declaration of current hardware support or API
-> stability.
+> This project is at an early stage. Phases 0–6 now provide read-only live
+> monitoring, persistence, optional Solis diagnostics, tariffs, forecasting and
+> shadow optimisation. The API is not yet stable and hardware control remains
+> unavailable.
 
 ## Overview
 
@@ -184,6 +185,10 @@ energy arbitrage build on the same plant model. Financial optimisation must
 remain subordinate to hardware limits, configured safety constraints, and the
 user's minimum reserve requirements.
 
+The current optimiser is deliberately shadow-only: it publishes an explained,
+constrained recommendation schedule and replay comparison but cannot execute
+the schedule. Missing or stale required data produces no action.
+
 ## API direction
 
 All useful daemon functionality should be available without a bundled UI. The
@@ -200,6 +205,12 @@ API is expected to cover:
 The API protocol, authentication model, and versioning policy will be defined
 before the first stable release. Network control endpoints must be
 authenticated and should bind locally by default.
+
+The implemented local API currently includes plant state, current/raw/rollup
+history, devices, capabilities, health, events, server-sent events, the
+pre-July 2026 ZEROHERO tariff, two-plane Forecast.Solar output,
+forecast-versus-actual history, shadow plans and Prometheus-format service
+metrics. See [phases 3–6](docs/phases-3-to-6.md) for exact behaviour.
 
 ## Reliability and security
 
@@ -220,18 +231,21 @@ protection, export limiting, or manufacturer safety mechanisms.
 
 ## Roadmap
 
-The broad delivery sequence is:
+The delivery status is:
 
-1. Document supported hardware and Solplanet Modbus register maps.
-2. Build a read-only daemon with device discovery, polling, health reporting,
-   and live telemetry.
-3. Define the common plant model and versioned API.
-4. Add safe, bounded control for supported Solplanet devices.
-5. Introduce the external integration interface and reference integrations.
-6. Add tariff and forecast models.
-7. Implement self-consumption optimisation, followed by cost and arbitrage
-   strategies.
-8. Add persistence, packaging, Linux service files, and upgrade guidance.
+1. Phases 0–2: foundations and live read-only Eastron/ASW integrations —
+   implemented.
+2. Phase 3: plant model, SQLite history/rollups and monitoring API —
+   implemented.
+3. Phase 4: optional plugin boundary and direct Solis diagnostics —
+   implemented.
+4. Phase 5: versioned ZEROHERO tariff and Forecast.Solar adapter —
+   implemented.
+5. Phase 6: constrained self-consumption/arbitrage planning in shadow mode —
+   implemented.
+6. Phase 7: separately approved, bounded ASW control — not started.
+7. Phase 8: production packaging, authentication and operational hardening —
+   not complete.
 
 Compatibility will be tracked by exact inverter, battery, firmware, connection
 method, and tested feature set rather than by broad product-family claims.
@@ -252,8 +266,10 @@ Contributions will be especially valuable in these areas:
 
 When reporting hardware behaviour, include the exact model, firmware version,
 connection method, and whether each register or control has been verified on
-physical equipment. Never include credentials, serial numbers, Wi-Fi details,
-or other private site information in an issue or capture.
+physical equipment. Never include credentials, device serial numbers, Wi-Fi
+details, or other private site information in an issue or capture. The
+documented FTDI USB adapter identifiers are the sole currently approved
+exception because they are required for stable by-ID device assignment.
 
 Development, testing, and contribution instructions will be added alongside the
 first implementation.

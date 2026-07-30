@@ -1,6 +1,12 @@
 [daemon]
 database = "/var/lib/solplanet-fasttalk/history.sqlite3"
 
+[storage]
+raw_retention_days = 14
+hourly_retention_days = 400
+daily_retention_days = 3650
+maintenance_interval_seconds = 3600
+
 [api]
 # The first milestone has no API authentication, so retain loopback binding.
 host = "127.0.0.1"
@@ -27,3 +33,70 @@ timeout_seconds = 1.5
 # the ASW into the site. Set to -1 if live correlation proves the inverse.
 active_power_multiplier = 1
 
+[solis]
+# Optional diagnostics only. Eastron slave 2 remains authoritative for
+# external-PV AC accounting if this plugin is disabled or disagrees.
+enabled = true
+device = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_B0032EAS-if00-port0"
+baud = 9600
+slave = 1
+timeout_seconds = 1.5
+poll_interval_seconds = 5
+mismatch_tolerance_watts = 750
+mismatch_duration_seconds = 60
+
+[tariff]
+# Archived supplied price fact sheet effective 25 May 2026. This deliberately
+# does not track or silently adopt later plan changes.
+enabled = true
+plan = "globird-zerohero-vpp-ausgrid-pre-2026-07"
+timezone = "Australia/Sydney"
+# Optional target-only JSON containing manually confirmed critical-peak events.
+exceptional_events_file = ""
+
+[forecast_solar]
+enabled = true
+# Credentials and the private plant location remain target-only. Home
+# Assistant's core.config file is read at runtime; coordinates are never exposed
+# by the daemon API or written to the forecast cache.
+api_key_file = "/root/forcast-solar-api.key"
+location_file = "/config/.storage/core.config"
+cache_file = "/var/lib/solplanet-fasttalk/forecast-solar-cache.json"
+refresh_interval_seconds = 1800
+retry_interval_seconds = 300
+request_timeout_seconds = 15
+max_cache_age_seconds = 21600
+
+# Forecast.Solar uses south=0, east=-90 and west=+90. These two entries are the
+# 20 x 310 W east and 20 x 310 W west planes already configured in HAOS.
+[[forecast_solar.planes]]
+name = "east"
+declination = 25
+azimuth = -90
+peak_power_kw = 6.2
+
+[[forecast_solar.planes]]
+name = "west"
+declination = 25
+azimuth = 90
+peak_power_kw = 6.2
+
+[optimisation]
+# Phase 6 is recommendation/replay only. There is no call path from this planner
+# to a serial write transport.
+enabled = true
+interval_seconds = 300
+horizon_hours = 36
+step_minutes = 15
+# Three parallel seven-module Ai-HB G2 stacks, 2.56 kWh per module.
+battery_capacity_kwh = 53.76
+reserve_soc_percent = 15
+maximum_soc_percent = 95
+max_charge_watts = 12000
+max_discharge_watts = 12000
+charge_efficiency = 0.95
+discharge_efficiency = 0.95
+# Conservative configurable boundaries; set these to confirmed site limits.
+site_import_limit_watts = 30000
+site_export_limit_watts = 30000
+minimum_arbitrage_margin_per_kwh = 0.03

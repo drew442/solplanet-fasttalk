@@ -20,10 +20,19 @@ class API:
         config: DaemonConfig,
         state: PlantState,
         history: HistoryReader,
+        *,
+        tariff=None,
+        forecast=None,
+        plans=None,
+        plugins=None,
     ) -> None:
         self.config = config
         self.state = state
         self.history = history
+        self.tariff = tariff
+        self.forecast = forecast
+        self.plans = plans
+        self.plugins = plugins
         self.server = ThreadingHTTPServer(
             (config.api.host, config.api.port),
             self._handler(),
@@ -46,7 +55,7 @@ class API:
         api = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "solplanet-fasttalk/0.1"
+            server_version = "solplanet-fasttalk/0.2"
 
             def do_GET(self) -> None:
                 parsed = urlparse(self.path)
@@ -58,6 +67,7 @@ class API:
                                 "service": "solplanet-fasttalk",
                                 "api_version": "v1",
                                 "control_available": False,
+                                "mode": "shadow",
                             }
                         )
                     elif parsed.path == "/v1/plant":
@@ -79,11 +89,15 @@ class API:
                                     since=self._one(query, "since"),
                                     until=self._one(query, "until"),
                                     limit=self._limit(query, 1000),
+                                    resolution=self._one(query, "resolution")
+                                    or "raw",
                                 )
                             }
                         )
                     elif parsed.path == "/v1/devices":
                         self._json({"devices": api._devices()})
+                    elif parsed.path == "/v1/capabilities":
+                        self._json(api._capabilities())
                     elif parsed.path == "/v1/health":
                         self._json(api.state.health())
                     elif parsed.path == "/v1/events":
@@ -92,6 +106,23 @@ class API:
                         )
                     elif parsed.path == "/v1/stream":
                         self._stream()
+                    elif parsed.path == "/v1/tariffs/current" and api.tariff:
+                        self._json(api.tariff.current())
+                    elif parsed.path == "/v1/forecasts/pv" and api.forecast:
+                        payload = api.forecast.snapshot()
+                        if self._one(query, "since") or self._one(query, "until"):
+                            payload["historical_comparison"] = (
+                                api.history.forecast_comparison(
+                                    since=self._one(query, "since"),
+                                    until=self._one(query, "until"),
+                                    limit=self._limit(query, 1000),
+                                )
+                            )
+                        self._json(payload)
+                    elif parsed.path == "/v1/plans/current" and api.plans:
+                        self._json(api.plans.snapshot())
+                    elif parsed.path == "/metrics":
+                        self._metrics()
                     else:
                         self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 except (ValueError, OSError) as exc:
@@ -99,7 +130,12 @@ class API:
 
             def do_POST(self) -> None:
                 self._json(
-                    {"error": "this milestone is read-only"},
+                    {
+                        "error": (
+                            "the daemon is in shadow mode; API control and "
+                            "Modbus writes are unavailable"
+                        )
+                    },
                     HTTPStatus.METHOD_NOT_ALLOWED,
                 )
 
@@ -111,6 +147,40 @@ class API:
                 payload = json.dumps(value, separators=(",", ":")).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def _metrics(self) -> None:
+                health = api.state.health()
+                qualities = health["measurement_quality"]
+                lines = [
+                    "# HELP solplanet_fasttalk_up Daemon health is not failed.",
+                    "# TYPE solplanet_fasttalk_up gauge",
+                    (
+                        "solplanet_fasttalk_up "
+                        + ("0" if health["status"] == "failed" else "1")
+                    ),
+                    "# TYPE solplanet_fasttalk_measurements gauge",
+                ]
+                for quality, count in sorted(qualities.items()):
+                    lines.append(
+                        'solplanet_fasttalk_measurements{quality="'
+                        + quality.replace('"', "")
+                        + f'"}} {count}'
+                    )
+                lines.extend(
+                    (
+                        "# TYPE solplanet_fasttalk_control_available gauge",
+                        "solplanet_fasttalk_control_available 0",
+                    )
+                )
+                payload = ("\n".join(lines) + "\n").encode()
+                self.send_response(HTTPStatus.OK)
+                self.send_header(
+                    "Content-Type", "text/plain; version=0.0.4; charset=utf-8"
+                )
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
@@ -199,5 +269,46 @@ class API:
                     "health": health.get("asw", {}),
                 }
             )
+        if self.config.solis.enabled:
+            devices.append(
+                {
+                    "id": "solis-10k",
+                    "type": "pv_inverter",
+                    "access_mode": "direct_wired_modbus",
+                    "authoritative_for": [],
+                    "supplements": ["external_pv_ac"],
+                    "measured_by": "eastron-terminal8:slave-2",
+                    "capabilities": [
+                        "dc_inputs",
+                        "temperature",
+                        "operating_state",
+                        "diagnostics",
+                    ],
+                    "control": False,
+                    "health": health.get("solis", {}),
+                }
+            )
         return devices
 
+    def _capabilities(self) -> dict[str, Any]:
+        capabilities = {
+            "accounting": {
+                "grid": "eastron-terminal8:slave-1",
+                "external_pv_ac": "eastron-terminal8:slave-2",
+                "source_resolution": "authoritative_meter_wins",
+            },
+            "control": {
+                "available": False,
+                "mode": "shadow",
+                "modbus_writes": False,
+            },
+            "history": ["raw", "hourly", "daily"],
+            "streaming": ["server_sent_events"],
+            "tariff": self.tariff is not None,
+            "forecast": self.forecast is not None,
+            "optimisation": self.plans is not None,
+            "plugins": (
+                self.plugins.descriptors() if self.plugins is not None else []
+            ),
+        }
+        return {"capabilities": capabilities}

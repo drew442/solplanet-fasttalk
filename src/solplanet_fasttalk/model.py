@@ -66,15 +66,14 @@ class PlantState:
             derived = (
                 self._derive_locked(measurement.observed_monotonic)
                 if measurement.name in self.DERIVATION_INPUTS
-                else None
+                else []
             )
             self._sequence += 1
             sinks = tuple(self._sinks)
             self._changed.notify_all()
-        for item in (measurement, derived):
-            if item is not None:
-                for sink in sinks:
-                    sink(item)
+        for item in (measurement, *derived):
+            for sink in sinks:
+                sink(item)
 
     def publish_many(self, measurements: list[Measurement]) -> None:
         if not measurements:
@@ -89,30 +88,31 @@ class PlantState:
                 if any(
                     item.name in self.DERIVATION_INPUTS for item in measurements
                 )
-                else None
+                else []
             )
             self._sequence += 1
             sinks = tuple(self._sinks)
             self._changed.notify_all()
-        for measurement in [*measurements, *([derived] if derived else [])]:
+        for measurement in [*measurements, *derived]:
             for sink in sinks:
                 sink(measurement)
 
-    def _derive_locked(self, now: float) -> Measurement | None:
+    def _derive_locked(self, now: float) -> list[Measurement]:
         names = self.DERIVATION_INPUTS
         inputs = [self._measurements.get(name) for name in names]
         if any(item is None for item in inputs):
-            self._measurements.pop("site.load_power", None)
-            return None
+            self._clear_derived_locked()
+            return []
         typed = [item for item in inputs if item is not None]
         if any(
             item.value is None
             or not isinstance(item.value, (int, float))
+            or item.quality != "good"
             or now - item.observed_monotonic > item.max_age_seconds
             for item in typed
         ):
-            self._measurements.pop("site.load_power", None)
-            return None
+            self._clear_derived_locked()
+            return []
         grid, external, asw = typed
         expiry = min(
             item.observed_monotonic + item.max_age_seconds for item in typed
@@ -123,26 +123,72 @@ class PlantState:
             + float(external.value)
             + float(asw.value)
         )
-        derived = Measurement(
-            "site.load_power",
-            round(value, 3),
-            "W",
-            "plant_model",
-            "derived",
-            "calculated",
-            utc_now(),
-            now,
-            max_age,
-            metadata={
-                "formula": (
-                    "grid.active_power + external_pv.active_power + "
-                    "asw.active_power"
-                ),
-                "inputs": list(names),
-            },
+        generation = max(0.0, float(external.value)) + max(
+            0.0, float(asw.value)
         )
-        self._measurements["site.load_power"] = derived
+        export = max(0.0, -float(grid.value))
+        load = max(0.0, value)
+        self_consumed = max(0.0, min(generation, generation - export, load))
+        specifications = (
+            (
+                "site.load_power",
+                round(value, 3),
+                "W",
+                "grid.active_power + external_pv.active_power + asw.active_power",
+            ),
+            (
+                "site.generation_power",
+                round(generation, 3),
+                "W",
+                "max(0, external_pv.active_power) + max(0, asw.active_power)",
+            ),
+            (
+                "site.self_consumption_power",
+                round(self_consumed, 3),
+                "W",
+                "min(site.generation_power - grid export, site.load_power)",
+            ),
+            (
+                "site.self_consumption_ratio",
+                round(self_consumed / generation, 6) if generation else None,
+                "ratio",
+                "site.self_consumption_power / site.generation_power",
+            ),
+            (
+                "site.self_sufficiency_ratio",
+                round(self_consumed / load, 6) if load else None,
+                "ratio",
+                "site.self_consumption_power / site.load_power",
+            ),
+        )
+        derived = [
+            Measurement(
+                name,
+                result,
+                unit,
+                "plant_model",
+                "derived",
+                "calculated",
+                utc_now(),
+                now,
+                max_age,
+                "unavailable" if result is None else "good",
+                {"formula": formula, "inputs": list(names)},
+            )
+            for name, result, unit, formula in specifications
+        ]
+        self._measurements.update({item.name: item for item in derived})
         return derived
+
+    def _clear_derived_locked(self) -> None:
+        for name in (
+            "site.load_power",
+            "site.generation_power",
+            "site.self_consumption_power",
+            "site.self_consumption_ratio",
+            "site.self_sufficiency_ratio",
+        ):
+            self._measurements.pop(name, None)
 
     def update_health(self, component: str, **values: Any) -> None:
         with self._changed:
@@ -155,10 +201,16 @@ class PlantState:
     def current(self) -> dict[str, dict[str, Any]]:
         now = time.monotonic()
         with self._lock:
-            return {
-                name: measurement.current_dict(now)
-                for name, measurement in sorted(self._measurements.items())
-            }
+            result = {}
+            for name, measurement in sorted(self._measurements.items()):
+                current = measurement.current_dict(now)
+                if (
+                    measurement.source == "plant_model"
+                    and current["quality"] == "stale"
+                ):
+                    continue
+                result[name] = current
+            return result
 
     def plant(self) -> dict[str, Any]:
         current = self.current()

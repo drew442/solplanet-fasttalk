@@ -20,12 +20,17 @@ keeps the remaining availability risks bounded and observable:
 - the Eastron descriptor is opened `O_RDONLY` and the integration has no
   transmit path;
 - ASW MONITOR permits only Modbus functions `0x03` and `0x04`;
+- the optional direct Solis plugin permits only Modbus function `0x04`;
 - no daemon control endpoint or Modbus write builder exists;
 - the ASW polling schedule, retry timeout and backoff are bounded;
 - every serial port is exclusively locked to prevent two daemon owners;
 - the API binds to loopback and reports that control is unavailable; and
 - stopping the daemon leaves the inverter, meter and native Solplanet system
   operating independently.
+
+The Forecast.Solar worker adds a bounded outbound HTTPS dependency, but only
+to forecasting. Failure or stale cache state produces a conservative
+no-action shadow plan and cannot stop either serial worker.
 
 Within this boundary, development, deployment, read-only diagnostics and soak
 testing may proceed autonomously. Future writes are governed by the
@@ -99,6 +104,7 @@ checkout/                         disposable Git checkout
 venv/                             disposable Python virtual environment
 persistent-data/history.sqlite3   persistent measurements
 private-config/runtime.toml       untracked, mode 0600
+private-config/forecast-solar-api.key  untracked, mode 0600
 private-logs/                     untracked live-test logs
 ```
 
@@ -200,8 +206,10 @@ Use this order:
 
 1. passive Eastron only;
 2. ASW MONITOR only;
-3. both integrations together; and
-4. a time-bounded canary before a longer soak.
+3. both authoritative integrations together;
+4. optional direct Solis reads;
+5. Forecast.Solar and shadow optimisation; and
+6. a time-bounded canary before a longer soak.
 
 Before each stage, verify that no other development process owns the relevant
 adapter and that the configuration resolves to the approved by-ID path.
@@ -218,7 +226,10 @@ A live canary passes only when:
   remain zero or at their documented stream-start baseline;
 - no measurement required for plant flow is stale;
 - grid, external-PV, ASW and derived site power reconcile physically; and
-- storage queue depth, dropped measurements and write failures remain zero.
+- storage queue depth, dropped measurements and write failures remain zero;
+  and
+- the shadow planner reports zero control commands and respects observed BMS
+  and configured site limits.
 
 Stop the new revision and return to the last known-good revision if a native
 meter goes offline, ASW reads repeatedly fail, traffic shape changes

@@ -108,8 +108,20 @@ POLL_GROUPS = (
             Field(24, "battery.limit.discharge_current", "u16", 0.1, "A"),
             Field(25, "battery.energy.charge_today", "u32", 0.1, "kWh"),
             Field(27, "battery.energy.discharge_today", "u32", 0.1, "kWh"),
-            Field(29, "site.energy.consumption_today", "u32", 0.1, "kWh"),
-            Field(31, "site.energy.generation_today", "u32", 0.1, "kWh"),
+            Field(
+                29,
+                "asw.reported_site.energy.consumption_today",
+                "u32",
+                0.1,
+                "kWh",
+            ),
+            Field(
+                31,
+                "asw.reported_site.energy.generation_today",
+                "u32",
+                0.1,
+                "kWh",
+            ),
         ),
     ),
     Group(
@@ -230,18 +242,25 @@ def decode_group(
         if len(words) != width:
             continue
         value = _decode(field.kind, words, field.scale)
+        authority = (
+            "reported"
+            if field.name.startswith("asw.reported_site.")
+            else "diagnostic"
+            if field.name.startswith(("asw.smart_meter.", "asw.grid_port."))
+            else "authoritative"
+        )
         result.append(
             Measurement(
                 field.name,
                 value,
                 field.unit,
                 "asw.monitor",
-                "authoritative",
+                authority,
                 "direct_wired_modbus",
                 observed_at,
                 observed_monotonic,
                 group.max_age,
-                "invalid" if value is None else "good",
+                "unavailable" if value is None else "good",
                 {
                     "slave": slave,
                     "function": f"0x{group.function:02x}",

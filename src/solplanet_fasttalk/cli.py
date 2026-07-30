@@ -7,6 +7,8 @@ import json
 import logging
 import sys
 import time
+import datetime as dt
+from collections import defaultdict
 from pathlib import Path
 
 from . import __version__
@@ -15,6 +17,9 @@ from .daemon import Daemon
 from .eastron import EastronDecoder
 from .model import PlantState
 from .modbus import RTUStreamDecoder, TransactionMatcher
+from .optimisation import ForecastSlot, simulate_plan
+from .storage import HistoryReader
+from .tariff import ZeroHeroTariff
 
 
 def command_check(args: argparse.Namespace) -> int:
@@ -27,7 +32,86 @@ def command_check(args: argparse.Namespace) -> int:
                 "api": {"host": config.api.host, "port": config.api.port},
                 "eastron_enabled": config.eastron.enabled,
                 "asw_enabled": config.asw.enabled,
+                "solis_enabled": config.solis.enabled,
+                "forecast_solar_enabled": config.forecast_solar.enabled,
+                "optimisation_mode": (
+                    "shadow" if config.optimisation.enabled else "disabled"
+                ),
                 "control_available": False,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def command_replay_optimisation(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    history = HistoryReader(config.database)
+    step_seconds = config.optimisation.step_minutes * 60
+
+    def buckets(name: str) -> dict[int, float]:
+        values: dict[int, list[float]] = defaultdict(list)
+        for item in history.measurements(
+            name,
+            since=args.since,
+            until=args.until,
+            limit=10000,
+        ):
+            if isinstance(item["value"], (int, float)):
+                timestamp = dt.datetime.fromisoformat(item["observed_at"])
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=dt.timezone.utc)
+                bucket = int(timestamp.timestamp()) // step_seconds
+                values[bucket].append(float(item["value"]))
+        return {
+            bucket: sum(samples) / len(samples)
+            for bucket, samples in values.items()
+        }
+
+    loads = buckets("site.load_power")
+    pv = buckets("external_pv.active_power")
+    common = sorted(set(loads) & set(pv))
+    if not common:
+        raise ValueError(
+            "history contains no overlapping site.load_power and "
+            "external_pv.active_power samples"
+        )
+    soc_history = history.measurements(
+        "battery.soc", since=args.since, until=args.until, limit=10000
+    )
+    numeric_soc = [
+        float(item["value"])
+        for item in reversed(soc_history)
+        if isinstance(item["value"], (int, float))
+    ]
+    if not numeric_soc:
+        raise ValueError("history contains no battery.soc baseline")
+    slots = [
+        ForecastSlot(
+            dt.datetime.fromtimestamp(
+                bucket * step_seconds, tz=dt.timezone.utc
+            ),
+            loads[bucket],
+            max(0.0, pv[bucket]),
+        )
+        for bucket in common
+    ]
+    result = simulate_plan(
+        config.optimisation,
+        ZeroHeroTariff(config.tariff),
+        slots,
+        initial_soc_percent=numeric_soc[0],
+        charge_limit_w=config.optimisation.max_charge_watts,
+        discharge_limit_w=config.optimisation.max_discharge_watts,
+    )
+    print(
+        json.dumps(
+            {
+                "mode": "historical_shadow_replay",
+                "slots": len(slots),
+                "control_commands_sent": 0,
+                **result,
             },
             indent=2,
         )
@@ -110,6 +194,12 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--capture", required=True)
     replay.add_argument("--chunk-size", type=int, default=37)
     replay.set_defaults(handler=command_replay)
+
+    optimisation = commands.add_parser("replay-optimisation")
+    optimisation.add_argument("--config", required=True)
+    optimisation.add_argument("--since")
+    optimisation.add_argument("--until")
+    optimisation.set_defaults(handler=command_replay_optimisation)
     return parser
 
 
@@ -125,4 +215,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

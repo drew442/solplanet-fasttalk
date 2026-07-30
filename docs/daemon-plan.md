@@ -5,11 +5,13 @@ Linux daemon. It prioritises a read-only, observable vertical slice before any
 control is enabled.
 
 > [!NOTE]
-> The first development milestone described below is implemented. Phases 0–3
-> have their initial working vertical slice, and the first combined live run
-> completed without disrupting the ASW, meters or native Solplanet app.
-> Retention/rollups, extended soak testing and broader production hardening
-> remain part of later iteration.
+> Phases 0–6 are implemented. The first combined phase-0–3 live run completed
+> without disrupting the ASW, meters or native Solplanet app. Phase-4 Solis
+> diagnostics and phase-5/6 online inputs still require a live canary. All
+> phase-6 output is shadow-only; phase 7 has not begun.
+
+Implementation details and operator-facing behaviour are documented in
+[Phases 3–6 implementation](phases-3-to-6.md).
 
 ## Confirmed initial plant
 
@@ -405,9 +407,12 @@ source-authority model before higher-level behaviour is added.
 - Confirm CT direction labels and persist orientation explicitly rather than
   embedding assumptions in the decoder.
 - Verify cumulative Eastron counters across midnight and daemon restart.
+- Run a live phase-4–6 canary and retain privacy-reviewed health summaries.
+- Accumulate enough authoritative Eastron production history to quantify
+  Forecast.Solar error and shadow-plan replay performance.
 - Determine and safely test the exact ASW control surface before phase 7.
-- Convert the supplied ZEROHERO plan into machine-readable tariff fixtures and
-  validate future tariff revisions before activation.
+- Validate any future tariff revision as a new version rather than mutating the
+  archived pre-July 2026 plan.
 
 The first combined daemon validation has already confirmed 62 successful ASW
 reads without failures or reconnects, 47 clean passive Eastron transactions,

@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import json
+import datetime as dt
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from queue import Empty
 from typing import Any
 
 from .model import Measurement, MeasurementQueue, utc_now
+
+
+def dt_from_iso(value: str) -> dt.datetime:
+    parsed = dt.datetime.fromisoformat(value)
+    return (
+        parsed.replace(tzinfo=dt.timezone.utc)
+        if parsed.tzinfo is None
+        else parsed.astimezone(dt.timezone.utc)
+    )
 
 
 SCHEMA = """
@@ -37,6 +48,34 @@ CREATE TABLE IF NOT EXISTS events (
     details_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_time ON events(occurred_at);
+CREATE TABLE IF NOT EXISTS measurement_rollups (
+    period_start TEXT NOT NULL,
+    period_seconds INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    samples INTEGER NOT NULL,
+    value_avg REAL,
+    value_min REAL,
+    value_max REAL,
+    value_last REAL,
+    unit TEXT NOT NULL,
+    quality TEXT NOT NULL,
+    source TEXT NOT NULL,
+    authority TEXT NOT NULL,
+    PRIMARY KEY (period_start, period_seconds, name)
+);
+CREATE INDEX IF NOT EXISTS rollups_name_time
+    ON measurement_rollups(name, period_seconds, period_start);
+CREATE TABLE IF NOT EXISTS forecast_points (
+    id INTEGER PRIMARY KEY,
+    provider TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    forecast_at TEXT NOT NULL,
+    power_w REAL NOT NULL,
+    metadata_json TEXT NOT NULL,
+    UNIQUE(provider, issued_at, forecast_at)
+);
+CREATE INDEX IF NOT EXISTS forecast_points_time
+    ON forecast_points(provider, forecast_at, issued_at);
 """
 
 
@@ -121,7 +160,16 @@ class HistoryReader:
         since: str | None = None,
         until: str | None = None,
         limit: int = 1000,
+        resolution: str = "raw",
     ) -> list[dict[str, Any]]:
+        if resolution != "raw":
+            return self.rollups(
+                name,
+                resolution=resolution,
+                since=since,
+                until=until,
+                limit=limit,
+            )
         clauses = ["name = ?"]
         values: list[Any] = [name]
         if since:
@@ -155,6 +203,84 @@ class HistoryReader:
             }
             for row in rows
         ]
+
+    def rollups(
+        self,
+        name: str,
+        *,
+        resolution: str,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        seconds = {"hourly": 3600, "daily": 86400}.get(resolution)
+        if seconds is None:
+            raise ValueError("resolution must be raw, hourly, or daily")
+        clauses = ["name = ?", "period_seconds = ?"]
+        values: list[Any] = [name, seconds]
+        if since:
+            clauses.append("period_start >= ?")
+            values.append(since)
+        if until:
+            clauses.append("period_start <= ?")
+            values.append(until)
+        values.append(max(1, min(limit, 10000)))
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT period_start, samples, value_avg, value_min, value_max,
+                       value_last, unit, quality, source, authority
+                FROM measurement_rollups
+                WHERE {' AND '.join(clauses)}
+                ORDER BY period_start DESC LIMIT ?
+                """,
+                values,
+            ).fetchall()
+        return [
+            {
+                "observed_at": row[0],
+                "name": name,
+                "value": row[5] if ".energy." in name else row[2],
+                "unit": row[6],
+                "quality": row[7],
+                "source": row[8],
+                "authority": row[9],
+                "access_mode": "rollup",
+                "metadata": {
+                    "resolution": resolution,
+                    "samples": row[1],
+                    "minimum": row[3],
+                    "maximum": row[4],
+                    "last": row[5],
+                    "average": row[2],
+                },
+            }
+            for row in rows
+        ]
+
+    def counter_baselines(self) -> dict[str, dict[str, Any]]:
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT m.name, m.observed_at, m.value_num, m.unit, m.source
+                FROM measurements AS m
+                JOIN (
+                    SELECT name, MAX(id) AS id
+                    FROM measurements
+                    WHERE value_num IS NOT NULL AND name LIKE '%.energy.%'
+                    GROUP BY name
+                ) AS latest ON latest.id = m.id
+                """
+            ).fetchall()
+        return {
+            row[0]: {
+                "observed_at": row[1],
+                "value": row[2],
+                "unit": row[3],
+                "source": row[4],
+            }
+            for row in rows
+        }
 
     def events(self, limit: int = 200) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as connection:
@@ -199,3 +325,194 @@ class HistoryReader:
                 ),
             )
             connection.commit()
+
+    def record_forecast(
+        self,
+        provider: str,
+        issued_at: str,
+        points: list[dict[str, Any]],
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO forecast_points (
+                    provider, issued_at, forecast_at, power_w, metadata_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        provider,
+                        issued_at,
+                        point["timestamp"],
+                        float(point["power_w"]),
+                        json.dumps(metadata or {}, separators=(",", ":")),
+                    )
+                    for point in points
+                ),
+            )
+            connection.commit()
+
+    def forecast_comparison(
+        self,
+        *,
+        provider: str = "forecast.solar",
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        clauses = ["provider = ?"]
+        values: list[Any] = [provider]
+        if since:
+            clauses.append("forecast_at >= ?")
+            values.append(since)
+        if until:
+            clauses.append("forecast_at <= ?")
+            values.append(until)
+        values.append(max(1, min(limit, 10000)))
+        with sqlite3.connect(self.path) as connection:
+            forecasts = connection.execute(
+                f"""
+                SELECT issued_at, forecast_at, power_w, metadata_json
+                FROM forecast_points AS candidate
+                WHERE {' AND '.join(clauses)}
+                  AND id = (
+                      SELECT MAX(latest.id) FROM forecast_points AS latest
+                      WHERE latest.provider = candidate.provider
+                        AND latest.forecast_at = candidate.forecast_at
+                        AND latest.issued_at <= candidate.forecast_at
+                  )
+                ORDER BY forecast_at DESC LIMIT ?
+                """,
+                values,
+            ).fetchall()
+            if not forecasts:
+                return []
+            earliest = min(row[1] for row in forecasts)
+            latest = max(row[1] for row in forecasts)
+            actuals = connection.execute(
+                """
+                SELECT observed_at, value_num, source, authority
+                FROM measurements
+                WHERE name = 'external_pv.active_power'
+                  AND value_num IS NOT NULL
+                  AND julianday(observed_at) >= julianday(?, '-15 minutes')
+                  AND julianday(observed_at) <= julianday(?, '+15 minutes')
+                ORDER BY observed_at
+                """,
+                (earliest, latest),
+            ).fetchall()
+        parsed_actuals = [
+            (dt_from_iso(row[0]), row) for row in actuals
+        ]
+        result = []
+        for issued_at, forecast_at, power_w, metadata_json in forecasts:
+            target = dt_from_iso(forecast_at)
+            closest = (
+                min(
+                    parsed_actuals,
+                    key=lambda value: abs(
+                        (value[0] - target).total_seconds()
+                    ),
+                )
+                if parsed_actuals
+                else None
+            )
+            if closest and abs((closest[0] - target).total_seconds()) <= 900:
+                row = closest[1]
+                actual = float(row[1])
+                result.append(
+                    {
+                        "forecast_at": forecast_at,
+                        "issued_at": issued_at,
+                        "forecast_power_w": power_w,
+                        "actual_power_w": actual,
+                        "error_w": actual - power_w,
+                        "actual_observed_at": row[0],
+                        "actual_source": row[2],
+                        "actual_authority": row[3],
+                        "metadata": json.loads(metadata_json),
+                    }
+                )
+        return result
+
+
+class StorageMaintainer:
+    """Build rollups before applying bounded retention."""
+
+    def __init__(self, path: str, config) -> None:
+        self.path = path
+        self.config = config
+        self.runs = 0
+        self.failures = 0
+
+    def run_once(self) -> None:
+        with sqlite3.connect(self.path) as connection:
+            for seconds, pattern in (
+                (3600, "%Y-%m-%dT%H:00:00+00:00"),
+                (86400, "%Y-%m-%dT00:00:00+00:00"),
+            ):
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO measurement_rollups (
+                        period_start, period_seconds, name, samples,
+                        value_avg, value_min, value_max, value_last,
+                        unit, quality, source, authority
+                    )
+                    SELECT strftime(?, observed_at), ?, name, COUNT(*),
+                           AVG(value_num), MIN(value_num), MAX(value_num),
+                           (
+                               SELECT last.value_num FROM measurements AS last
+                               WHERE last.name = measurements.name
+                                 AND strftime(?, last.observed_at) =
+                                     strftime(?, measurements.observed_at)
+                                 AND last.value_num IS NOT NULL
+                               ORDER BY last.observed_at DESC, last.id DESC
+                               LIMIT 1
+                           ),
+                           MAX(unit),
+                           CASE WHEN MIN(quality) = 'good' AND
+                                     MAX(quality) = 'good'
+                                THEN 'good' ELSE 'mixed' END,
+                           MAX(source), MAX(authority)
+                    FROM measurements
+                    WHERE value_num IS NOT NULL
+                    GROUP BY strftime(?, observed_at), name
+                    """,
+                    (pattern, seconds, pattern, pattern, pattern),
+                )
+            connection.execute(
+                """
+                DELETE FROM measurements
+                WHERE julianday(observed_at) < julianday('now', ?)
+                """,
+                (f"-{self.config.raw_retention_days} days",),
+            )
+            connection.execute(
+                """
+                DELETE FROM measurement_rollups
+                WHERE period_seconds = 3600
+                  AND julianday(period_start) < julianday('now', ?)
+                """,
+                (f"-{self.config.hourly_retention_days} days",),
+            )
+            connection.execute(
+                """
+                DELETE FROM measurement_rollups
+                WHERE period_seconds = 86400
+                  AND julianday(period_start) < julianday('now', ?)
+                """,
+                (f"-{self.config.daily_retention_days} days",),
+            )
+            connection.commit()
+        self.runs += 1
+
+    def run(self, stop: threading.Event) -> None:
+        while not stop.is_set():
+            started = time.monotonic()
+            try:
+                self.run_once()
+            except sqlite3.Error:
+                self.failures += 1
+            elapsed = time.monotonic() - started
+            stop.wait(max(1.0, self.config.maintenance_interval_seconds - elapsed))
