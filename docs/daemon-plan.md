@@ -353,6 +353,11 @@ The following are non-negotiable:
    and firmware.
 7. Existing inverter protection and export limiting remain safety mechanisms;
    the daemon is not a substitute for mandated electrical protection.
+8. Every proposed write is classified by the
+   [Modbus write safety policy](modbus-write-safety.md). Permanently
+   prohibited and unreviewed operations cannot reach a frame builder;
+   approval-required operations need an informed, owner-approved risk
+   assessment.
 
 ## Initial API surface
 

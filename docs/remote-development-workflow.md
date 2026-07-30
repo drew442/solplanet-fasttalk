@@ -28,9 +28,12 @@ keeps the remaining availability risks bounded and observable:
   operating independently.
 
 Within this boundary, development, deployment, read-only diagnostics and soak
-testing may proceed autonomously. Any future Modbus write, firmware operation,
-device configuration change, USB reset, wiring change or host-level HAOS
-change requires a separate reviewed procedure and explicit approval.
+testing may proceed autonomously. Future writes are governed by the
+[Modbus write safety policy](modbus-write-safety.md): permanently prohibited
+operations cannot be approved, and controlled operations require a complete
+risk assessment and explicit approval. Firmware operations, device
+configuration outside that policy, USB resets, wiring changes and host-level
+HAOS changes also require a separate reviewed procedure.
 
 ## Access architecture
 
@@ -134,8 +137,7 @@ pre-authorized within the read-only milestone:
 
 The following require explicit operator approval for each procedure:
 
-- any Modbus function other than `0x03` or `0x04`;
-- any device setting, control command, firmware access or reset;
+- any operation classified `approval_required` by the Modbus safety policy;
 - direct transmission on terminal 8;
 - changing a baud rate, slave address, polling profile or sign convention;
 - attaching, removing, rewiring or terminating an RS-485 connection;
@@ -147,6 +149,9 @@ The following require explicit operator approval for each procedure:
 
 An unexpected need for one of these actions is a stop condition, not permission
 to improvise.
+
+Operations classified `permanently_prohibited` or `unreviewed_deny` cannot be
+made permissible by a per-operation approval.
 
 ## Deployment loop
 
@@ -266,7 +271,9 @@ the live plant.
 ## Future control work
 
 Root access is not permission to test control. Control development begins in
-simulation and shadow mode. Physical commands require all of the following:
+simulation and shadow mode. Physical commands must first pass the
+[Modbus write safety policy](modbus-write-safety.md) and require all of the
+following:
 
 - a separately reviewed write allow-list for the exact ASW model and firmware;
 - hard-coded power, SOC, rate and duration bounds;

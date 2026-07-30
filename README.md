@@ -287,6 +287,11 @@ physical equipment must follow the
 [safe remote development workflow](docs/remote-development-workflow.md);
 remote access does not authorize device control.
 
+The [Modbus write safety policy](docs/modbus-write-safety.md) defines
+machine-readable permanent prohibitions, approval-gated plant controls and the
+risk assessment required before any physical write. The current daemon remains
+read-only and rejects every write function.
+
 `solplanet-fasttalk` is an independent project and is not affiliated with or
 endorsed by Solplanet.
 
