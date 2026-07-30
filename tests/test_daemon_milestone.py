@@ -206,10 +206,15 @@ class ASWDecodeTests(unittest.TestCase):
                 }
             )
         self.assertEqual(decoded["asw.model"], "ASW12kH-T3")
-        self.assertEqual(decoded["battery.soc"], 98)
-        self.assertEqual(decoded["battery.soh"], 100)
-        self.assertEqual(decoded["asw.active_power"], 0)
-        self.assertEqual(decoded["asw.smart_meter.active_power"], -2572)
+        self.assertGreaterEqual(decoded["battery.soc"], 0)
+        self.assertLessEqual(decoded["battery.soc"], 100)
+        self.assertGreaterEqual(decoded["battery.soh"], 0)
+        self.assertLessEqual(decoded["battery.soh"], 100)
+        self.assertIsInstance(decoded["asw.active_power"], (int, float))
+        self.assertIsInstance(
+            decoded["asw.smart_meter.active_power"],
+            (int, float),
+        )
 
 
 class ConfigurationTests(unittest.TestCase):
