@@ -1,0 +1,21 @@
+[Unit]
+Description=solplanet-fasttalk local PV and ESS daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+User=solplanet-fasttalk
+Group=solplanet-fasttalk
+SupplementaryGroups=dialout
+ExecStart=/usr/local/bin/solplanet-fasttalk run --config /etc/solplanet-fasttalk.toml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/solplanet-fasttalk
+
+[Install]
+WantedBy=multi-user.target
+

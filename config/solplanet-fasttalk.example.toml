@@ -1,0 +1,29 @@
+[daemon]
+database = "/var/lib/solplanet-fasttalk/history.sqlite3"
+
+[api]
+# The first milestone has no API authentication, so retain loopback binding.
+host = "127.0.0.1"
+port = 8765
+
+[eastron]
+enabled = true
+device = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG04Q3CR-if00-port0"
+baud = 9600
+grid_slave = 1
+external_pv_slave = 2
+# Stable convention: grid positive means import; external PV positive means
+# delivered generation. Change only after a correlated live validation.
+grid_power_multiplier = 1
+external_pv_power_multiplier = 1
+
+[asw]
+enabled = true
+device = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_B003LSFR-if00-port0"
+baud = 9600
+slave = 3
+timeout_seconds = 1.5
+# Stable convention used by site.load_power: positive means AC generation from
+# the ASW into the site. Set to -1 if live correlation proves the inverse.
+active_power_multiplier = 1
+

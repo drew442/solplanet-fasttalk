@@ -24,7 +24,9 @@ internet outage.
 Solplanet hybrid inverters and batteries are the core of the system. Relevant
 third-party equipment—such as additional PV inverters, energy meters, weather
 services, and PV forecasting providers—can be added through modular
-integrations.
+integrations. Where a site meter measures an external inverter's AC feeder,
+that meter can provide the authoritative plant-accounting measurement without
+requiring a vendor-specific inverter driver.
 
 ## Goals
 
@@ -100,15 +102,15 @@ what changed, when it changed, and why.
 ## Proposed architecture
 
 ```text
- Solplanet inverter / ESS ── direct Modbus ──┐
- External inverter / meter ─ integration ────┼── Device and data model
- Forecast / tariff service ─ integration ────┘            │
-                                                          ├── Telemetry
-                                                          ├── Optimisation
-                                                          ├── Control and safety
-                                                          └── Public API
-                                                                  │
-                                              dashboards / automation / apps
+ Solplanet inverter / ESS ── direct Modbus ─────────┐
+ Grid / external-PV meter ── passive Modbus ────────┼── Plant data model
+ Optional device diagnostics ─ direct integration ─┤          │
+ Forecast / tariff service ── integration ─────────┘          ├── Telemetry
+                                                              ├── Optimisation
+                                                              ├── Control/safety
+                                                              └── Public API
+                                                                      │
+                                                  dashboards / automation / apps
 ```
 
 The daemon is expected to be divided into a small set of clear subsystems:
@@ -143,6 +145,26 @@ An integration should declare its capabilities and dependencies, publish data
 using standard names and units, report data freshness and health, and remain
 isolated from the core optimisation logic. Cloud-backed integrations must be
 optional and must not prevent local hardware operation when unavailable.
+
+### Measurement authority
+
+The initial plant uses the terminal-8 Eastron SEM3-M-2L-CT as the
+authoritative source for:
+
+- utility-grid import/export and its per-phase electrical measurements; and
+- the AC output delivered by the external Solis PV inverter.
+
+The ASW MONITOR integration remains authoritative for Solplanet inverter,
+aggregate Ai-HB battery, BMS, operating-state and control data. A direct Solis
+or other third-party inverter integration is optional: it can add DC input
+measurements, temperature, identity, faults, diagnostics or supported device
+control, but its energy counters do not replace the Eastron measurement for
+plant accounting.
+
+This policy permits basic compatibility with any AC-coupled inverter measured
+by the external-PV CTs. If several inverters share those CTs, their production
+is authoritative only as an aggregate; individual diagnosis still requires
+per-inverter integration or additional metering.
 
 ## Energy optimisation
 
@@ -214,6 +236,9 @@ The broad delivery sequence is:
 Compatibility will be tracked by exact inverter, battery, firmware, connection
 method, and tested feature set rather than by broad product-family claims.
 
+The detailed implementation sequence, subsystem boundaries and milestone
+acceptance criteria are in the [daemon implementation plan](docs/daemon-plan.md).
+
 ## Contributing
 
 Contributions will be especially valuable in these areas:
@@ -235,16 +260,67 @@ first implementation.
 
 ## Live hardware discovery
 
-The repository includes a guarded, read-only Modbus RTU discovery utility for
-the initial Solis and Solplanet test hardware. See the
-[live system discovery runbook](docs/live-system-discovery.md) before using it.
-The runbook deliberately leaves the inverter-controlled Eastron bus untouched.
+The repository includes guarded, read-only Modbus RTU discovery utilities for
+the initial Solis and Solplanet test hardware and a receive-only terminal-8
+capture utility. See the
+[live system discovery runbook](docs/live-system-discovery.md) before using
+them. The Eastron bus must remain under the inverter's control: the project
+observes it through physically disconnected transmit terminals and never adds
+a second Modbus master.
 
 ## Project status
 
-Design and initial development. Do not use this software to control production
-equipment until the relevant hardware and safety paths are explicitly marked as
-tested.
+The first read-only daemon milestone is implemented: passive Eastron
+grid/external-PV telemetry, direct read-only ASW inverter/battery telemetry,
+measurement freshness, derived plant flow, SQLite history, health reporting
+and a local API. Control, tariff optimisation and production release hardening
+remain future milestones.
+
+Do not use this software to control production equipment until the relevant
+hardware and safety paths are explicitly marked as tested.
 
 `solplanet-fasttalk` is an independent project and is not affiliated with or
 endorsed by Solplanet.
+
+## Running the read-only daemon
+
+Python 3.11 or newer is required. Install the checkout and create a local
+configuration:
+
+```console
+python3 -m pip install .
+sudo install -d -o solplanet-fasttalk -g solplanet-fasttalk \
+  /var/lib/solplanet-fasttalk
+sudo install -m 0640 config/solplanet-fasttalk.example.toml \
+  /etc/solplanet-fasttalk.toml
+solplanet-fasttalk check-config --config /etc/solplanet-fasttalk.toml
+solplanet-fasttalk run --config /etc/solplanet-fasttalk.toml
+```
+
+Review the serial by-ID paths and sign multipliers before starting. The API
+defaults to `127.0.0.1:8765` and is intentionally not authenticated in this
+milestone, so do not expose it on another interface.
+
+Useful read-only endpoints include:
+
+```text
+GET /v1/plant
+GET /v1/measurements/current
+GET /v1/measurements/history?name=grid.active_power
+GET /v1/devices
+GET /v1/health
+GET /v1/events
+GET /v1/stream
+```
+
+The example unit in
+[`packaging/systemd/solplanet-fasttalk.service`](packaging/systemd/solplanet-fasttalk.service)
+can run the daemon continuously after the service user, serial permissions,
+configuration and installation path have been prepared.
+
+The terminal-8 capture can be replayed without hardware:
+
+```console
+solplanet-fasttalk replay-eastron \
+  --capture discovery-output/eastron-terminal8-sniff-9600.json
+```

@@ -5,7 +5,9 @@ This runbook gathers read-only Modbus RTU evidence from the initial test plant:
 - Solis-10K through its dedicated Waveshare USB-RS485 adapter; and
 - Solplanet ASW12kH-T3 through the MONITOR port and its dedicated Waveshare
   USB-RS485 adapter. Discovery began on pins 7–8; pins 1–2 are now the
-  preferred third-party connection.
+  preferred third-party connection; and
+- Eastron SEM3-M-2L-CT terminal-8 traffic through the receive terminals of an
+  SH-U11F operating as a passive RS-422 listener.
 
 The baseline and CT-data stages do **not** query the Eastron meter directly.
 Stage 6 adds a narrowly scoped read-only meter-route hypothesis recovered from
@@ -154,6 +156,8 @@ The discovery profile incorporates the observed behavior:
 - device type is a one-register ASCII string (`"3"` for three-phase);
 - inverter energy today and total are signed net-energy counters;
 - battery SOC is expressed in whole percent;
+- battery SOH is also observed as a whole-percent value (`100` for the test
+  battery), despite the document's `0.01` multiplier;
 - grid-side phase active power is signed; and
 - `0x8000`/`0x80000000` signed NaN values are reported as unavailable.
 
@@ -266,24 +270,20 @@ Raw request and response frames are intentionally retained. They let us
 distinguish a register-map error, byte/word-order issue, Modbus exception and
 plausible decoded value without repeating the live test.
 
-## What happens next
+## Interim conclusion after stages 1–5
 
-The returned data establishes that:
+Before the terminal-8 capture, the returned data established that:
 
 1. the ASW mirrors the Eastron grid channel's live per-phase measurements, but
-   no second-channel data has been identified;
+   no second-channel data had yet been identified;
 2. plant power flow can be reconstructed from ASW grid data plus direct Solis
    data; and
 3. part of the V2.1.4 `CT Data` range represents real measurements, while
    other fields are unsupported, invalid or not populated on this model.
 
-A passive, receive-only RS485 capture of the ASW–Eastron bus remains useful
-only to recover or rule out second-channel polling and to validate the
-terminal-8 protocol directly.
-
-The original work deliberately deferred direct Eastron queries until these
-alternatives had been exhausted. The Ai-dongle analysis below now provides a
-specific, bounded route to test.
+The later passive capture in stage 8 supersedes the first conclusion: it
+identified both logical meter channels directly. This interim section is
+retained to show why the firmware and bus-discovery stages were performed.
 
 ## Stage 6: Ai-dongle meter route
 
@@ -469,10 +469,9 @@ repeated the exact slave-1 Eastron-signature request used by
 `asw-meter-tunnel`, and it was silent, so repeating that profile would add no
 evidence.
 
-## Stage 8: optional passive terminal-8 capture
+## Stage 8: passive terminal-8 capture
 
-If recovering the Eastron's second measurement channel remains desirable, the
-remaining direct discovery method is a parallel, receive-only tap on the
+The final direct discovery method is a parallel, receive-only tap on the
 existing ASW–Eastron terminal-8 RS-485 pair. It must add no termination, must
 never connect an additional transmitter, and must leave the inverter and meter
 as the only active bus participants.
@@ -500,7 +499,7 @@ A few minutes covering ordinary import/export changes should reveal the meter
 slave address, function codes, register ranges, and whether the ASW polls a
 second SEM3 channel.
 
-### SH-U11F supervised capture
+### SH-U11F receive-only deployment
 
 The available DSD Tech SH-U11F has separate RS-422 `RXD+`/`RXD-` and
 `TXD+`/`TXD-` terminals, so its receiver can be connected while its transmitter
@@ -516,10 +515,12 @@ resistance measurements were:
 | `RXD-` to isolated ground | 4.4 kΩ |
 
 This identifies a failsafe pull-up/pull-down network. It is not a strictly
-unbiased high-impedance tap, but its approximately 8.9-kΩ bias path is far
-lighter than a 120-Ω termination and is acceptable for a short, supervised
-capture on this otherwise lightly loaded bus. It is not approved here as a
-permanent tap.
+unbiased receiver, but its approximately 8.9-kΩ bias path is far lighter than
+a 120-Ω termination. The live installation uses approximately four metres of
+CAT6 between terminal 8 and the unmodified SH-U11F and has shown clean
+communication at 9600 baud. Continued daemon use is conditional on retaining
+the receive-only wiring and termination setting and monitoring the CRC error
+rate and ASW meter health.
 
 Connect only the terminal-8 pair to `RXD+`/`RXD-`. Leave the SH-U11F
 termination jumper removed and leave `TXD+(A+)`, `TXD-(B-)`, 5 V and ground
@@ -554,3 +555,75 @@ JSON before attempting another baud rate or a longer capture.
 
 The JSON may contain raw device responses and plant operating data. Treat it
 like the other ignored files under `discovery-output/`.
+
+### Stage 8 results
+
+`discovery-output/eastron-terminal8-sniff-9600.json` contains a clean
+60-second capture:
+
+- 5,241 bytes in 544 USB chunks;
+- 302 CRC-valid frames forming 151 request/response transactions;
+- all complete frames parsed without CRC errors or Modbus exceptions; and
+- only the two bytes already in flight when capture began left unparsed.
+
+All observed requests use function `0x04` (Read Input Registers). No write
+operation appears on the bus. Two logical slave addresses expose the same
+standard Eastron register layout:
+
+| Slave | Physical measurement | Live evidence |
+| --- | --- | --- |
+| `1` | Utility-grid CTs | Mixed import/export phase powers with a near-zero aggregate during the capture |
+| `2` | External-PV CTs around the Solis feeder | Three positive, similar phase powers declining with late-afternoon PV output |
+
+The previously considered channel-2 `+3000` register-offset hypothesis is
+incorrect for this installation. Channel separation is by slave address, not
+by a second register segment under slave 1.
+
+The observed request schedule is:
+
+| Slave | PDU start | Count | Contents | Transactions in 60 s |
+| ---: | ---: | ---: | --- | ---: |
+| 1 | 12 | 6 | Three phase active powers | 128 |
+| 1 | 0 | 90 | General electrical measurements | 1 |
+| 1 | 200 | 10 | Line-to-line voltages | 1 |
+| 1 | 342 | 40 | Per-phase and aggregate energy | 2 |
+| 2 | 12 | 6 | Three phase active powers | 5 |
+| 2 | 0 | 90 | General electrical measurements | 5 |
+| 2 | 200 | 10 | Line-to-line voltages | 5 |
+| 2 | 342 | 40 | Per-phase and aggregate energy | 4 |
+
+Slave-1 phase power is sampled approximately every 0.45 seconds for the ASW's
+grid-control loop. The slave-2 groups rotate, with each group recurring about
+every 12.5 seconds. Because both the phase-power block and the general block
+contain phase active power, usable external-PV samples arrive at alternating
+intervals of approximately three and nine seconds.
+
+The Eastron uses big-endian IEEE-754 floating-point values. The decoded capture
+included:
+
+- slave-1 aggregate grid power between approximately `-88 W` and `+107 W`;
+- slave-2 aggregate external-PV power declining from approximately `669 W` to
+  `576 W`;
+- bidirectional cumulative grid energy on slave 1; and
+- approximately `2484.77 kWh` forward and `2.36 kWh` reverse cumulative energy
+  on the external-PV channel, consistent with its CT orientation.
+
+### Source-of-truth decision
+
+The daemon will treat the terminal-8 Eastron measurements as authoritative for
+plant accounting:
+
+- slave 1 is authoritative for utility-grid import/export; and
+- slave 2 is authoritative for the AC production delivered by the external PV
+  inverter or aggregate of inverters enclosed by those CTs.
+
+The ASW MONITOR integration remains authoritative for inverter, battery, BMS,
+operating-state and control data. Direct Solis and other external-inverter
+drivers are optional diagnostic/control enhancements. They may supply DC
+inputs, temperatures, identity, internal state and faults, but their power and
+energy counters do not supersede Eastron data in the plant model.
+
+This division provides brand-independent external-PV compatibility while
+preserving the detailed Solplanet ESS data and control path required for
+self-consumption optimisation and arbitrage. See
+[`daemon-plan.md`](daemon-plan.md) for the implementation sequence.

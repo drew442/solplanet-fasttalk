@@ -202,7 +202,12 @@ MONITOR/COM2 RS-485 pin pairs found only the ASW at slave 3:
 - on both pin pairs, slaves 1–2 and 4–16 were silent.
 
 No meter address responds on MONITOR, and the live dongle is not configured
-to poll one. The working conclusion is that terminal 8 is a separate
-electrical bus polled internally by the ASW. Passive capture of that existing
-ASW–Eastron exchange is now more useful than further active MONITOR-port
-guesses.
+to poll one. Terminal 8 is a separate electrical bus polled internally by the
+ASW.
+
+A subsequent passive capture of that bus resolved the remaining question. The
+ASW polls two logical Eastron slaves using the same standard register offsets:
+slave 1 measures the grid CTs and slave 2 measures the Solis feeder CTs. The
+earlier `+3000` channel-2 hypothesis is therefore disproven for this
+installation. See the stage-8 results in
+[`live-system-discovery.md`](live-system-discovery.md).
