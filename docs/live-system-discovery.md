@@ -627,3 +627,80 @@ This division provides brand-independent external-PV compatibility while
 preserving the detailed Solplanet ESS data and control path required for
 self-consumption optimisation and arbitrage. See
 [`daemon-plan.md`](daemon-plan.md) for the implementation sequence.
+
+## First live daemon validation
+
+The first read-only daemon milestone was run on the HAOS test machine with both
+live integrations enabled. During the run:
+
+- the ASW continued operating normally;
+- both Eastron channels remained online;
+- grid import/export continued to work;
+- the Solplanet app continued to show current plant data; and
+- the passive terminal-8 listener did not disturb the ASW meter poller.
+
+The daemon health snapshot recorded:
+
+| Component | Result |
+| --- | --- |
+| ASW MONITOR | 62 successful reads, no failures or reconnects |
+| Terminal-8 listener | 47 matched transactions from 94 frames |
+| Terminal-8 errors | No CRC errors, missing responses, unmatched responses or Modbus exceptions |
+| Persistence | 756 measurements written, with no write failures or queue drops |
+| API and overall health | `ok`; loopback-only API; control unavailable |
+
+The two bytes discarded by the terminal-8 decoder were the tail of a frame
+already in progress when the listener started. This is expected stream-start
+behaviour and is consistent with the earlier standalone capture.
+
+The live plant snapshot gave the following simultaneous operating values:
+
+| Measurement | Value |
+| --- | ---: |
+| Authoritative grid power | `+7290.148 W` import |
+| Authoritative external-PV power | `+5857.555 W` generation |
+| ASW AC power | `-11812 W` consumption/charging |
+| Derived site load | `+1335.703 W` |
+
+The plant equation reconciled exactly:
+
+```text
+site.load_power =
+    grid.active_power
+  + external_pv.active_power
+  + asw.active_power
+
+1335.703 W = 7290.148 W + 5857.555 W - 11812 W
+```
+
+The ASW was reporting a `-12000 W` command and approximately `-11257 W`
+battery power, which is consistent with battery charging plus inverter
+conversion and auxiliary consumption. Its smart-meter mirror was within
+approximately `114 W` of the directly observed Eastron grid value even though
+the observations were about 1.3 seconds apart. Per-phase values also summed
+closely to their respective grid, external-PV and ASW aggregates.
+
+The battery reported 67% SOC, 100% SOH, normal current limits and no active ASW
+fault or warning words. The known `0xffff` and `0x80000000` sentinel values are
+unsupported or unavailable fields rather than communication failures.
+
+This test validates the connection topology, measurement signs, source
+authority and instantaneous site-load calculation. It is a short functional
+validation, not yet the required multi-day reliability soak.
+
+### Follow-up data-model corrections
+
+Two issues were identified without affecting the successful live operation:
+
+1. The unpopulated ASW registers currently named
+   `site.energy.consumption_today` and `site.energy.generation_today` return
+   zero and must not be presented as authoritative plant totals. They should
+   be suppressed or retained under an explicitly ASW-reported namespace.
+   Authoritative site totals will be calculated from Eastron observations and
+   persisted counter baselines.
+2. Documented sentinel values currently have quality `invalid`. A distinct
+   `unavailable` quality will better separate supported-but-unpopulated
+   registers from malformed data.
+
+The raw validation snapshots remain under the ignored `discovery-output/`
+directory because they contain detailed plant operating data.

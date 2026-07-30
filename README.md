@@ -273,11 +273,19 @@ a second Modbus master.
 The first read-only daemon milestone is implemented: passive Eastron
 grid/external-PV telemetry, direct read-only ASW inverter/battery telemetry,
 measurement freshness, derived plant flow, SQLite history, health reporting
-and a local API. Control, tariff optimisation and production release hardening
-remain future milestones.
+and a local API. Its first combined HAOS live run completed without disrupting
+the ASW, either meter, import/export behaviour or the native Solplanet app.
+Control, tariff optimisation, extended soak testing and production release
+hardening remain future milestones.
 
 Do not use this software to control production equipment until the relevant
 hardware and safety paths are explicitly marked as tested.
+
+Live-system findings are maintained in the
+[discovery runbook](docs/live-system-discovery.md). Development against
+physical equipment must follow the
+[safe remote development workflow](docs/remote-development-workflow.md);
+remote access does not authorize device control.
 
 `solplanet-fasttalk` is an independent project and is not affiliated with or
 endorsed by Solplanet.

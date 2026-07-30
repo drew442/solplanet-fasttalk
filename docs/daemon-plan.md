@@ -6,8 +6,10 @@ control is enabled.
 
 > [!NOTE]
 > The first development milestone described below is implemented. Phases 0–3
-> have their initial working vertical slice; retention/rollups and broader
-> production hardening remain part of later iteration.
+> have their initial working vertical slice, and the first combined live run
+> completed without disrupting the ASW, meters or native Solplanet app.
+> Retention/rollups, extended soak testing and broader production hardening
+> remain part of later iteration.
 
 ## Confirmed initial plant
 
@@ -401,3 +403,15 @@ source-authority model before higher-level behaviour is added.
 - Determine and safely test the exact ASW control surface before phase 7.
 - Convert the supplied ZEROHERO plan into machine-readable tariff fixtures and
   validate future tariff revisions before activation.
+
+The first combined daemon validation has already confirmed 62 successful ASW
+reads without failures or reconnects, 47 clean passive Eastron transactions,
+zero persistence failures and exact reconciliation of the instantaneous plant
+flow equation. Full evidence and the two resulting data-model corrections are
+documented in [Live system discovery](live-system-discovery.md#first-live-daemon-validation).
+
+Remote development against this plant must follow the
+[safe remote development workflow](remote-development-workflow.md). That
+workflow grants broad autonomy inside the current read-only boundary while
+reserving all device writes, resets, firmware operations and physical changes
+for explicit review and approval.
