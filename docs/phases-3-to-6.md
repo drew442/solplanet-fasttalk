@@ -145,3 +145,26 @@ GET /metrics
 All `POST` requests remain rejected. Phase 7 cannot begin until its separate
 hardware-specific write verification, risk assessment and explicit approval
 gates have been completed.
+
+## Initial live validation
+
+The bounded HAOS canary for code commit `6cf2d43` passed the phase-6 runtime
+invariants:
+
+- Eastron, ASW and optional Solis workers remained healthy;
+- required accounting, battery and derived measurements were fresh;
+- Eastron retained grid and external-PV authority while Solis remained
+  diagnostic;
+- the two-plane provider response was cached and all forecast points were
+  persisted after correcting a SQLite writer-lock starvation issue;
+- forecast-versus-authoritative-actual comparison was populated;
+- the optimiser produced a feasible 47-slot schedule;
+- every recommendation contained explanations and remained inside observed
+  BMS, configured SOC and configured site limits;
+- the live replay estimated a positive tariff-cost improvement;
+- the storage queue reported no dropped measurements or write failures;
+- API mutation was rejected with HTTP 405; and
+- the plan reported zero control commands and no execution capability.
+
+The canary was stopped cleanly after validation. This result supports continued
+shadow-mode soaking; it does not satisfy or bypass any phase-7 control gate.

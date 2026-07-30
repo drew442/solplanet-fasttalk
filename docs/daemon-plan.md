@@ -6,9 +6,10 @@ control is enabled.
 
 > [!NOTE]
 > Phases 0–6 are implemented. The first combined phase-0–3 live run completed
-> without disrupting the ASW, meters or native Solplanet app. Phase-4 Solis
-> diagnostics and phase-5/6 online inputs still require a live canary. All
-> phase-6 output is shadow-only; phase 7 has not begun.
+> without disrupting the ASW, meters or native Solplanet app. The subsequent
+> phase-4–6 canary validated direct Solis diagnostics, the two-plane online
+> forecast and a constrained shadow plan. All phase-6 output is shadow-only;
+> phase 7 has not begun.
 
 Implementation details and operator-facing behaviour are documented in
 [Phases 3–6 implementation](phases-3-to-6.md).
@@ -407,7 +408,8 @@ source-authority model before higher-level behaviour is added.
 - Confirm CT direction labels and persist orientation explicitly rather than
   embedding assumptions in the decoder.
 - Verify cumulative Eastron counters across midnight and daemon restart.
-- Run a live phase-4–6 canary and retain privacy-reviewed health summaries.
+- Extend the successful phase-4–6 canary into a multi-day soak and retain only
+  privacy-reviewed health summaries.
 - Accumulate enough authoritative Eastron production history to quantify
   Forecast.Solar error and shadow-plan replay performance.
 - Determine and safely test the exact ASW control surface before phase 7.
