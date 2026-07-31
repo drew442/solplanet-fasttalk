@@ -234,7 +234,7 @@ class ForecastSolarWorker:
             url,
             headers={
                 "Accept": "application/json",
-                "User-Agent": "solplanet-fasttalk/0.3",
+                "User-Agent": "solplanet-fasttalk/0.3.1",
             },
         )
         with urlopen(request, timeout=self.config.request_timeout_seconds) as response:

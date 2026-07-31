@@ -9,10 +9,11 @@ import sys
 import time
 import datetime as dt
 from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 
 from . import __version__
-from .config import ConfigError, EastronConfig, load_config
+from .config import ConfigError, EastronConfig, load_config, validate_config
 from .daemon import Daemon
 from .eastron import EastronDecoder
 from .model import PlantState
@@ -22,14 +23,45 @@ from .storage import HistoryReader
 from .tariff import ZeroHeroTariff
 
 
-def command_check(args: argparse.Namespace) -> int:
+def _runtime_config(args: argparse.Namespace):
     config = load_config(args.config)
+    api_host = getattr(args, "api_host", None)
+    api_port = getattr(args, "api_port", None)
+    auth_token_file = getattr(args, "api_auth_token_file", None)
+    if (
+        api_host is not None
+        or api_port is not None
+        or auth_token_file is not None
+    ):
+        config = replace(
+            config,
+            api=replace(
+                config.api,
+                host=config.api.host if api_host is None else api_host,
+                port=config.api.port if api_port is None else api_port,
+                auth_token_file=(
+                    config.api.auth_token_file
+                    if auth_token_file is None
+                    else auth_token_file
+                ),
+            ),
+        )
+        validate_config(config)
+    return config
+
+
+def command_check(args: argparse.Namespace) -> int:
+    config = _runtime_config(args)
     print(
         json.dumps(
             {
                 "status": "ok",
                 "database": config.database,
-                "api": {"host": config.api.host, "port": config.api.port},
+                "api": {
+                    "host": config.api.host,
+                    "port": config.api.port,
+                    "authenticated": bool(config.api.auth_token_file),
+                },
                 "eastron_enabled": config.eastron.enabled,
                 "asw_enabled": config.asw.enabled,
                 "solis_enabled": config.solis.enabled,
@@ -120,7 +152,7 @@ def command_replay_optimisation(args: argparse.Namespace) -> int:
 
 
 def command_run(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
+    config = _runtime_config(args)
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper()),
         format="%(asctime)s %(levelname)s %(threadName)s %(message)s",
@@ -179,10 +211,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     check = commands.add_parser("check-config")
     check.add_argument("--config", required=True)
+    _add_api_overrides(check)
     check.set_defaults(handler=command_check)
 
     run = commands.add_parser("run")
     run.add_argument("--config", required=True)
+    _add_api_overrides(run)
     run.add_argument(
         "--log-level",
         choices=("debug", "info", "warning", "error"),
@@ -201,6 +235,25 @@ def build_parser() -> argparse.ArgumentParser:
     optimisation.add_argument("--until")
     optimisation.set_defaults(handler=command_replay_optimisation)
     return parser
+
+
+def _add_api_overrides(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--api-host",
+        help="override the configured API bind address for this process",
+    )
+    parser.add_argument(
+        "--api-port",
+        type=int,
+        help="override the configured API port for this process",
+    )
+    parser.add_argument(
+        "--api-auth-token-file",
+        help=(
+            "override the API bearer-token file; pass an empty value only "
+            "with a loopback bind"
+        ),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

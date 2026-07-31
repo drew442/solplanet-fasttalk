@@ -74,6 +74,23 @@ ssh -L 8765:127.0.0.1:8765 YOUR_PRIVATE_TARGET_ALIAS
 Then open <http://127.0.0.1:8765/diagnostics/> locally. The tunnel is the
 preferred remote-development path.
 
+### Local operator script
+
+From a repository checkout:
+
+```console
+./scripts/fasttalk-local.sh start /PRIVATE_CONFIG_DIRECTORY/runtime.toml
+./scripts/fasttalk-local.sh status
+./scripts/fasttalk-local.sh stop
+```
+
+`start` runs the daemon in the background and forces the API to
+`127.0.0.1`, even if the supplied configuration names a token. `restart` is
+also available. The script records the PID, Linux process-start identity and
+access mode in a private runtime directory. It will not start a second daemon,
+stop LAN mode through the local script, or force-kill a process that does not
+shut down within 30 seconds.
+
 ## Opt-in phone or LAN access
 
 Listening beyond loopback is an explicit deployment choice. Create a
@@ -109,6 +126,51 @@ network/add-on settings remains a separate reviewed operation.
 Non-loopback startup fails closed when the token is absent, shorter than 32
 characters, contains whitespace, is unreadable or is accessible to group/other
 users.
+
+### LAN and token operator scripts
+
+The token script creates an atomic mode-`0600` secret. Creation reports only
+the path; displaying the credential is a separate explicit action:
+
+```console
+./scripts/fasttalk-token.sh create
+./scripts/fasttalk-token.sh status
+./scripts/fasttalk-token.sh show
+```
+
+After copying the displayed token into the browser:
+
+```console
+./scripts/fasttalk-lan.sh start /PRIVATE_CONFIG_DIRECTORY/runtime.toml
+./scripts/fasttalk-lan.sh status
+./scripts/fasttalk-lan.sh stop
+./scripts/fasttalk-token.sh destroy
+```
+
+LAN mode forces the API bind to `0.0.0.0`, validates the token through the
+daemon's normal configuration safety checks, and refuses to start without it.
+The token cannot be destroyed while a script-managed LAN daemon is running.
+The scripts also refuse to interfere with a daemon started manually or by a
+service manager.
+
+Local and LAN scripts share one mode/PID state, so switching modes is explicit:
+stop the current mode, then start the other. These scripts are an alternative
+to a systemd or HAOS add-on service, not a wrapper around one.
+
+Defaults can be changed without editing the scripts:
+
+| Environment variable | Purpose | Default |
+| --- | --- | --- |
+| `SOLPLANET_FASTTALK_CONFIG` | base daemon TOML | `/etc/solplanet-fasttalk.toml`, then the repository example |
+| `SOLPLANET_FASTTALK_BIN` | installed daemon executable | discovered from `PATH`, the HAOS test venv or a checkout venv |
+| `SOLPLANET_FASTTALK_TOKEN_FILE` | private token path | `$XDG_CONFIG_HOME/solplanet-fasttalk/diagnostics-api.token` |
+| `SOLPLANET_FASTTALK_STATE_DIR` | PID/mode runtime state | `$XDG_RUNTIME_DIR/solplanet-fasttalk-run`, otherwise `/tmp/solplanet-fasttalk-run` |
+| `SOLPLANET_FASTTALK_LOG_FILE` | background daemon log | `daemon.log` inside the runtime-state directory |
+| `SOLPLANET_FASTTALK_API_PORT` | local/LAN HTTP port | `8765` |
+
+An optional config path given after `start` or `restart` takes precedence over
+`SOLPLANET_FASTTALK_CONFIG`. No token value, private path or runtime state is
+committed to the repository.
 
 ## Read-only API additions
 

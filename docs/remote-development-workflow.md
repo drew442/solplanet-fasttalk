@@ -161,6 +161,14 @@ to improvise.
 Operations classified `permanently_prohibited` or `unreviewed_deny` cannot be
 made permissible by a per-operation approval.
 
+After LAN access has been explicitly approved for a deployment, use the
+mode-aware scripts documented in the
+[diagnostics web UI guide](diagnostics-webui.md). Token creation and LAN
+startup remain separate commands so a credential cannot silently create a
+new network listener. Returning to local-only access requires stopping the LAN
+script and starting the local script; the shared process state prevents both
+modes from running concurrently.
+
 ## Deployment loop
 
 Each remotely deployed revision follows the same progression.

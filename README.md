@@ -338,6 +338,24 @@ private bearer-token file is configured; see the
 [diagnostics web UI guide](docs/diagnostics-webui.md) before enabling LAN
 access.
 
+The repository includes background operator scripts for explicit local and
+authenticated LAN modes:
+
+```console
+./scripts/fasttalk-local.sh start /path/to/runtime.toml
+./scripts/fasttalk-local.sh stop
+
+./scripts/fasttalk-token.sh create
+./scripts/fasttalk-lan.sh start /path/to/runtime.toml
+./scripts/fasttalk-lan.sh stop
+./scripts/fasttalk-token.sh destroy
+```
+
+Use `status` with either daemon script and `show` with the token script when
+the browser credential needs to be entered. The scripts prevent concurrent
+local/LAN instances and do not manage daemons started through systemd or
+another service supervisor.
+
 Useful read-only endpoints include:
 
 ```text
