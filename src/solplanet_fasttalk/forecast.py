@@ -176,6 +176,7 @@ class ForecastSolarWorker:
         self.requests = 0
         self.failures = 0
         self.persistence_failures = 0
+        self.last_persistence_ok = True
 
     def run(self, stop: threading.Event) -> None:
         self.state.update_health(
@@ -192,9 +193,10 @@ class ForecastSolarWorker:
                     "forecast_solar",
                     status=(
                         "degraded"
-                        if self.persistence_failures
+                        if not self.last_persistence_ok
                         else self.store.snapshot()["status"]
                     ),
+                    error=None,
                     successful_requests=self.requests,
                     failed_requests=self.failures,
                     persistence_failures=self.persistence_failures,
@@ -270,8 +272,10 @@ class ForecastSolarWorker:
                         "scope": "combined",
                     },
                 )
+                self.last_persistence_ok = True
             except sqlite3.Error:
                 self.persistence_failures += 1
+                self.last_persistence_ok = False
         self._save_cache(payload)
         self.requests += 1
 

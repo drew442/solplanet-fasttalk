@@ -37,6 +37,7 @@ class FinancialAccountingWorker:
                 self.state.update_health(
                     "financial_accounting",
                     status="ok",
+                    error=None,
                     intervals_written=self.intervals_written,
                     latest_period=self.history.latest_financial_period(),
                     model="authoritative grid minute averages",

@@ -445,7 +445,7 @@ class HistoryReader:
         points: list[dict[str, Any]],
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        with sqlite3.connect(self.path) as connection:
+        with sqlite3.connect(self.path, timeout=30.0) as connection:
             connection.executemany(
                 """
                 INSERT OR REPLACE INTO forecast_points (
@@ -634,7 +634,7 @@ class HistoryReader:
     ) -> None:
         if not intervals:
             return
-        with sqlite3.connect(self.path) as connection:
+        with sqlite3.connect(self.path, timeout=30.0) as connection:
             connection.executemany(
                 """
                 INSERT OR REPLACE INTO financial_intervals (
@@ -665,7 +665,7 @@ class HistoryReader:
         description: str,
         plan_id: str,
     ) -> None:
-        with sqlite3.connect(self.path) as connection:
+        with sqlite3.connect(self.path, timeout=30.0) as connection:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO financial_adjustments (
@@ -846,7 +846,7 @@ class HistoryReader:
         simulation = plan.get("simulation") or {}
         baseline = simulation.get("baseline") or {}
         optimized = simulation.get("optimized") or {}
-        with sqlite3.connect(self.path) as connection:
+        with sqlite3.connect(self.path, timeout=30.0) as connection:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO plan_history (

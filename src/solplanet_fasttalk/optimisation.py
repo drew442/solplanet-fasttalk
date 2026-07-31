@@ -616,6 +616,7 @@ class OptimisationWorker:
             "optimisation",
             status="ok",
             mode="shadow",
+            reason=None,
             plans_generated=self.runs,
             persistence_failures=self.persistence_failures,
             control_commands_sent=0,
