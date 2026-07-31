@@ -873,7 +873,7 @@ main {
 
 .schedule-row {
   display: grid;
-  grid-template-columns: 78px 100px 1fr 100px 70px;
+  grid-template-columns: 78px 94px 1fr 96px 70px 130px;
   gap: 12px;
   align-items: center;
   min-height: 47px;
@@ -1307,10 +1307,10 @@ dialog input:focus {
   }
 
   .schedule-row {
-    grid-template-columns: 62px 82px 1fr 66px;
+    grid-template-columns: 62px 82px 1fr;
   }
 
-  .schedule-row > :nth-child(5) {
+  .schedule-row > :nth-child(n + 4) {
     display: none;
   }
 

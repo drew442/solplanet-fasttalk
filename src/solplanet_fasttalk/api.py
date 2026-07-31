@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import hmac
 import json
 import threading
@@ -63,7 +64,7 @@ class API:
         api = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "solplanet-fasttalk/0.3.1"
+            server_version = "solplanet-fasttalk/0.4.0"
 
             def do_GET(self) -> None:
                 parsed = urlparse(self.path)
@@ -153,6 +154,34 @@ class API:
                         self._stream()
                     elif parsed.path == "/v1/tariffs/current" and api.tariff:
                         self._json(api.tariff.current())
+                    elif parsed.path == "/v1/tariffs/forecast" and api.tariff:
+                        hours = max(
+                            1,
+                            min(168, int(self._one(query, "hours") or 48)),
+                        )
+                        step = max(
+                            5,
+                            min(60, int(self._one(query, "step_minutes") or 15)),
+                        )
+                        start = dt.datetime.now(dt.timezone.utc).replace(
+                            second=0,
+                            microsecond=0,
+                        )
+                        self._json(
+                            {
+                                "generated_at": start.isoformat(),
+                                "points": [
+                                    api.tariff.quote(
+                                        start + dt.timedelta(minutes=offset)
+                                    ).as_dict()
+                                    for offset in range(
+                                        0,
+                                        hours * 60 + 1,
+                                        step,
+                                    )
+                                ],
+                            }
+                        )
                     elif parsed.path == "/v1/forecasts/pv" and api.forecast:
                         payload = api.forecast.snapshot()
                         if self._one(query, "since") or self._one(query, "until"):
@@ -166,6 +195,40 @@ class API:
                         self._json(payload)
                     elif parsed.path == "/v1/plans/current" and api.plans:
                         self._json(api.plans.snapshot())
+                    elif parsed.path == "/v1/plans/history":
+                        self._json(
+                            {
+                                "plans": api.history.plans(
+                                    since=self._one(query, "since"),
+                                    until=self._one(query, "until"),
+                                    limit=self._limit(query, 200),
+                                    include_plan=(
+                                        self._one(query, "include_plan") == "true"
+                                    ),
+                                )
+                            }
+                        )
+                    elif parsed.path == "/v1/financials/history":
+                        self._json(
+                            {
+                                "financials": api.history.financial_history(
+                                    since=self._one(query, "since"),
+                                    until=self._one(query, "until"),
+                                    bucket_seconds=int(
+                                        self._one(query, "bucket_seconds")
+                                        or 3600
+                                    ),
+                                    limit=self._limit(query, 1000),
+                                )
+                            }
+                        )
+                    elif parsed.path == "/v1/financials/summary":
+                        self._json(
+                            api.history.financial_summary(
+                                since=self._one(query, "since"),
+                                until=self._one(query, "until"),
+                            )
+                        )
                     elif parsed.path == "/v1/diagnostics":
                         self._json(api._diagnostics())
                     elif parsed.path == "/metrics":
@@ -418,7 +481,14 @@ class API:
                 "mode": "shadow",
                 "modbus_writes": False,
             },
-            "history": ["raw", "hourly", "daily"],
+            "history": [
+                "raw",
+                "hourly",
+                "daily",
+                "financial",
+                "forecast_accuracy",
+                "plan_decisions",
+            ],
             "streaming": ["server_sent_events"],
             "tariff": self.tariff is not None,
             "forecast": self.forecast is not None,
@@ -430,6 +500,23 @@ class API:
         return {"capabilities": capabilities}
 
     def _diagnostics(self) -> dict[str, Any]:
+        now = dt.datetime.now(dt.timezone.utc)
+        if self.tariff:
+            local = now.astimezone(self.tariff.timezone)
+            today = local.replace(hour=0, minute=0, second=0, microsecond=0)
+            month = today.replace(day=1)
+            financials = {
+                "today": self.history.financial_summary(
+                    since=today.astimezone(dt.timezone.utc).isoformat(),
+                    until=now.isoformat(),
+                ),
+                "month": self.history.financial_summary(
+                    since=month.astimezone(dt.timezone.utc).isoformat(),
+                    until=now.isoformat(),
+                ),
+            }
+        else:
+            financials = None
         return {
             "plant": self.state.plant(),
             "measurements": self.state.current(),
@@ -439,5 +526,7 @@ class API:
             "tariff": self.tariff.current() if self.tariff else None,
             "forecast": self.forecast.snapshot() if self.forecast else None,
             "plan": self.plans.snapshot() if self.plans else None,
+            "plan_history": self.history.plans(limit=12),
+            "financials": financials,
             "events": self.history.events(20),
         }

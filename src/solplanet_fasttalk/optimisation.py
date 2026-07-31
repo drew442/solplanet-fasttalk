@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import sqlite3
 import threading
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -11,6 +12,10 @@ from .config import OptimisationConfig
 from .forecast import ForecastStore
 from .model import PlantState, utc_now
 from .tariff import ZeroHeroTariff
+
+
+ASW12KH_T3_MAX_BATTERY_CHARGE_W = 12000.0
+ASW12KH_T3_MAX_BATTERY_DISCHARGE_W = 12000.0
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,8 @@ class Recommendation:
     forecast_load_w: float
     forecast_pv_w: float
     baseline_grid_power_w: float
+    baseline_battery_power_w: float
+    baseline_expected_soc_percent: float
     battery_power_w: float
     expected_grid_power_w: float
     expected_soc_percent: float
@@ -35,6 +42,18 @@ class Recommendation:
     explanation: tuple[str, ...]
     constraints: dict[str, float]
     feasible: bool
+
+
+@dataclass(frozen=True)
+class NativeBaseline:
+    mode: str = "hold"
+    requested_power_w: float = 0.0
+    minimum_soc_percent: float = 0.0
+    maximum_soc_percent: float = 100.0
+    source: str = "fallback"
+    assumption: str = (
+        "hold battery because a fresh native inverter command was unavailable"
+    )
 
 
 def _bill(
@@ -118,9 +137,19 @@ def simulate_plan(
     initial_soc_percent: float,
     charge_limit_w: float,
     discharge_limit_w: float,
+    native_baseline: NativeBaseline | None = None,
 ) -> dict[str, Any]:
-    """Create a feasible greedy schedule and compare it with no battery action."""
+    """Compare a shadow schedule with continuation of the native command."""
 
+    baseline_policy = native_baseline or NativeBaseline()
+    charge_limit_w = max(
+        0.0,
+        min(charge_limit_w, ASW12KH_T3_MAX_BATTERY_CHARGE_W),
+    )
+    discharge_limit_w = max(
+        0.0,
+        min(discharge_limit_w, ASW12KH_T3_MAX_BATTERY_DISCHARGE_W),
+    )
     step_hours = config.step_minutes / 60.0
     capacity_wh = config.battery_capacity_kwh * 1000.0
     minimum_wh = capacity_wh * config.reserve_soc_percent / 100.0
@@ -128,6 +157,20 @@ def simulate_plan(
     stored_wh = min(
         maximum_wh,
         max(minimum_wh, capacity_wh * initial_soc_percent / 100.0),
+    )
+    baseline_minimum_wh = capacity_wh * max(
+        0.0, min(100.0, baseline_policy.minimum_soc_percent)
+    ) / 100.0
+    baseline_maximum_wh = capacity_wh * max(
+        baseline_policy.minimum_soc_percent,
+        min(100.0, baseline_policy.maximum_soc_percent),
+    ) / 100.0
+    baseline_stored_wh = min(
+        baseline_maximum_wh,
+        max(
+            baseline_minimum_wh,
+            capacity_wh * initial_soc_percent / 100.0,
+        ),
     )
     baseline_import_kwh = baseline_export_kwh = 0.0
     optimized_import_kwh = optimized_export_kwh = 0.0
@@ -142,8 +185,45 @@ def simulate_plan(
     for index, slot in enumerate(slots):
         quote = tariff.quote(slot.timestamp)
         natural_grid = slot.load_w - slot.pv_w
-        baseline_import = max(0.0, natural_grid) * step_hours / 1000.0
-        baseline_export = max(0.0, -natural_grid) * step_hours / 1000.0
+        baseline_battery_power = 0.0
+        if baseline_policy.mode == "charge":
+            room_input_w = max(
+                0.0,
+                (baseline_maximum_wh - baseline_stored_wh)
+                / max(step_hours * config.charge_efficiency, 0.001),
+            )
+            baseline_battery_power = -min(
+                abs(baseline_policy.requested_power_w),
+                charge_limit_w,
+                room_input_w,
+            )
+        elif baseline_policy.mode == "discharge":
+            available_output_w = max(
+                0.0,
+                (baseline_stored_wh - baseline_minimum_wh)
+                * config.discharge_efficiency
+                / max(step_hours, 0.001),
+            )
+            baseline_battery_power = min(
+                abs(baseline_policy.requested_power_w),
+                discharge_limit_w,
+                available_output_w,
+            )
+        baseline_stored_wh += (
+            max(0.0, -baseline_battery_power)
+            * step_hours
+            * config.charge_efficiency
+            - max(0.0, baseline_battery_power)
+            * step_hours
+            / config.discharge_efficiency
+        )
+        baseline_stored_wh = min(
+            baseline_maximum_wh,
+            max(baseline_minimum_wh, baseline_stored_wh),
+        )
+        baseline_grid = natural_grid - baseline_battery_power
+        baseline_import = max(0.0, baseline_grid) * step_hours / 1000.0
+        baseline_export = max(0.0, -baseline_grid) * step_hours / 1000.0
         baseline_import_kwh += baseline_import
         baseline_export_kwh += baseline_export
         baseline_flows.append(
@@ -273,7 +353,9 @@ def simulate_plan(
                 action,
                 round(slot.load_w, 3),
                 round(slot.pv_w, 3),
-                round(natural_grid, 3),
+                round(baseline_grid, 3),
+                round(baseline_battery_power, 3),
+                round(baseline_stored_wh / capacity_wh * 100.0, 3),
                 round(battery_power, 3),
                 round(expected_grid, 3),
                 round(stored_wh / capacity_wh * 100.0, 3),
@@ -287,6 +369,12 @@ def simulate_plan(
                     "site_export_limit_w": config.site_export_limit_watts,
                     "reserve_soc_percent": config.reserve_soc_percent,
                     "maximum_soc_percent": config.maximum_soc_percent,
+                    "manufacturer_max_charge_w": (
+                        ASW12KH_T3_MAX_BATTERY_CHARGE_W
+                    ),
+                    "manufacturer_max_discharge_w": (
+                        ASW12KH_T3_MAX_BATTERY_DISCHARGE_W
+                    ),
                 },
                 feasible,
             )
@@ -302,6 +390,7 @@ def simulate_plan(
                 "cost": round(baseline_cost, 6),
                 "import_kwh": round(baseline_import_kwh, 6),
                 "export_kwh": round(baseline_export_kwh, 6),
+                "policy": asdict(baseline_policy),
             },
             "optimized": {
                 "cost": round(optimized_cost, 6),
@@ -312,8 +401,23 @@ def simulate_plan(
                 baseline_cost - optimized_cost, 6
             ),
             "model": (
-                "deterministic shadow replay; includes ZEROHERO eligibility "
+                "deterministic shadow comparison against continuation of the "
+                "current native inverter command; includes ZEROHERO eligibility "
                 "and Super Export cap; excludes equal daily supply charge"
+            ),
+        },
+        "hardware_limits": {
+            "model": "ASW12kH-T3",
+            "manufacturer_max_charge_w": ASW12KH_T3_MAX_BATTERY_CHARGE_W,
+            "manufacturer_max_discharge_w": ASW12KH_T3_MAX_BATTERY_DISCHARGE_W,
+            "planning_interval_seconds": config.step_minutes * 60,
+            "basis": (
+                "manufacturer battery charge/discharge rating, further capped "
+                "by configured and live BMS voltage×current limits"
+            ),
+            "excluded_limit": (
+                "24 kVA EPS overload rating is limited to 10 seconds and is "
+                "not used for battery dispatch planning"
             ),
         },
     }
@@ -336,6 +440,7 @@ class OptimisationWorker:
         self.plans = plans
         self.history = history
         self.runs = 0
+        self.persistence_failures = 0
 
     def run(self, stop: threading.Event) -> None:
         self.state.update_health(
@@ -353,6 +458,7 @@ class OptimisationWorker:
                     mode="shadow",
                     reason=plan["reason"],
                     plans_generated=self.runs,
+                    persistence_failures=self.persistence_failures,
                     control_commands_sent=0,
                 )
                 delay = min(30, self.config.interval_seconds)
@@ -363,6 +469,7 @@ class OptimisationWorker:
                     mode="shadow",
                     reason="forecast exceeds controllable site constraints",
                     plans_generated=self.runs,
+                    persistence_failures=self.persistence_failures,
                     control_commands_sent=0,
                 )
                 delay = self.config.interval_seconds
@@ -372,20 +479,28 @@ class OptimisationWorker:
 
     def plan_once(self) -> dict[str, Any]:
         current = self.state.current()
+        required_names = (
+            "battery.soc",
+            "battery.voltage",
+            "battery.limit.charge_current",
+            "battery.limit.discharge_current",
+            "grid.active_power",
+            "site.load_power",
+        )
+        input_names = required_names + (
+            "asw.control.charge_discharge_state",
+            "asw.control.power_command",
+            "battery.limit.soc_lower",
+            "battery.limit.soc_upper",
+        )
         required = {
             name: current.get(name)
-            for name in (
-                "battery.soc",
-                "battery.voltage",
-                "battery.limit.charge_current",
-                "battery.limit.discharge_current",
-                "grid.active_power",
-                "site.load_power",
-            )
+            for name in input_names
         }
         bad = [
             name
-            for name, value in required.items()
+            for name in required_names
+            for value in (required[name],)
             if not value
             or value["quality"] != "good"
             or not isinstance(value["value"], (int, float))
@@ -410,12 +525,12 @@ class OptimisationWorker:
                 "required measurement unavailable or stale: " + ", ".join(bad),
                 inputs,
             )
-            self.plans.replace(plan)
+            self._publish(plan)
             return plan
         forecast = self.forecast.snapshot()
         if forecast["status"] != "ok" or not forecast["points"]:
             plan = _no_action("current PV forecast unavailable or stale", inputs)
-            self.plans.replace(plan)
+            self._publish(plan)
             return plan
 
         now = dt.datetime.now(dt.timezone.utc)
@@ -447,7 +562,7 @@ class OptimisationWorker:
             )
         if not slots:
             plan = _no_action("forecast has no points in planning horizon", inputs)
-            self.plans.replace(plan)
+            self._publish(plan)
             return plan
         voltage = required["battery.voltage"]
         charge_current = required["battery.limit.charge_current"]
@@ -458,10 +573,17 @@ class OptimisationWorker:
         observed_discharge = float(voltage["value"]) * float(
             discharge_current["value"]
         )
-        charge_limit = min(self.config.max_charge_watts, observed_charge)
-        discharge_limit = min(
-            self.config.max_discharge_watts, observed_discharge
+        charge_limit = min(
+            self.config.max_charge_watts,
+            ASW12KH_T3_MAX_BATTERY_CHARGE_W,
+            observed_charge,
         )
+        discharge_limit = min(
+            self.config.max_discharge_watts,
+            ASW12KH_T3_MAX_BATTERY_DISCHARGE_W,
+            observed_discharge,
+        )
+        native_baseline = self._native_baseline(required)
         result = simulate_plan(
             self.config,
             self.tariff,
@@ -469,6 +591,7 @@ class OptimisationWorker:
             initial_soc_percent=float(required["battery.soc"]["value"]),
             charge_limit_w=charge_limit,
             discharge_limit_w=discharge_limit,
+            native_baseline=native_baseline,
         )
         plan = {
             "generated_at": utc_now(),
@@ -487,16 +610,69 @@ class OptimisationWorker:
             "control_commands_sent": 0,
             "execution_available": False,
         }
-        self.plans.replace(plan)
+        self._publish(plan)
         self.runs += 1
         self.state.update_health(
             "optimisation",
             status="ok",
             mode="shadow",
             plans_generated=self.runs,
+            persistence_failures=self.persistence_failures,
             control_commands_sent=0,
         )
         return plan
+
+    def _publish(self, plan: dict[str, Any]) -> None:
+        self.plans.replace(plan)
+        if self.history is not None:
+            try:
+                self.history.record_plan(plan)
+            except sqlite3.Error:
+                self.persistence_failures += 1
+
+    @staticmethod
+    def _native_baseline(
+        inputs: dict[str, dict[str, Any] | None],
+    ) -> NativeBaseline:
+        state = inputs.get("asw.control.charge_discharge_state")
+        command = inputs.get("asw.control.power_command")
+        lower = inputs.get("battery.limit.soc_lower")
+        upper = inputs.get("battery.limit.soc_upper")
+        fresh = lambda value: bool(
+            value
+            and value["quality"] == "good"
+            and isinstance(value["value"], (int, float))
+        )
+        if not fresh(state) or not fresh(command):
+            return NativeBaseline()
+        mode = {1: "hold", 2: "charge", 3: "discharge"}.get(
+            int(state["value"]),
+            "hold",
+        )
+        requested = (
+            abs(float(command["value"])) if mode in ("charge", "discharge") else 0.0
+        )
+        minimum = max(
+            0.0,
+            min(100.0, float(lower["value"]) if fresh(lower) else 0.0),
+        )
+        maximum = max(
+            minimum,
+            min(100.0, float(upper["value"]) if fresh(upper) else 100.0),
+        )
+        return NativeBaseline(
+            mode=mode,
+            requested_power_w=requested,
+            minimum_soc_percent=minimum,
+            maximum_soc_percent=maximum,
+            source=(
+                "ASW Modbus registers 41152/41153 and native battery SOC bounds"
+            ),
+            assumption=(
+                "the currently stored native mode and power command persist "
+                "until a native SOC bound; future native schedule changes are unknown"
+            ),
+        )
 
     def _load_profile(self, now: dt.datetime) -> dict[tuple[int, int], float]:
         if self.history is None:

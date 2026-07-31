@@ -76,6 +76,49 @@ CREATE TABLE IF NOT EXISTS forecast_points (
 );
 CREATE INDEX IF NOT EXISTS forecast_points_time
     ON forecast_points(provider, forecast_at, issued_at);
+CREATE TABLE IF NOT EXISTS financial_intervals (
+    period_start TEXT PRIMARY KEY,
+    local_date TEXT NOT NULL,
+    local_hour INTEGER NOT NULL,
+    average_grid_power_w REAL NOT NULL,
+    imported_kwh REAL NOT NULL,
+    exported_kwh REAL NOT NULL,
+    import_price_per_kwh REAL NOT NULL,
+    export_price_per_kwh REAL NOT NULL,
+    import_cost REAL NOT NULL,
+    export_credit REAL NOT NULL,
+    net_energy_cost REAL NOT NULL,
+    samples INTEGER NOT NULL,
+    import_period TEXT NOT NULL,
+    export_period TEXT NOT NULL,
+    plan_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS financial_intervals_date
+    ON financial_intervals(local_date, period_start);
+CREATE TABLE IF NOT EXISTS financial_adjustments (
+    local_date TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    amount REAL NOT NULL,
+    description TEXT NOT NULL,
+    plan_id TEXT NOT NULL,
+    PRIMARY KEY (local_date, kind)
+);
+CREATE INDEX IF NOT EXISTS financial_adjustments_time
+    ON financial_adjustments(occurred_at);
+CREATE TABLE IF NOT EXISTS plan_history (
+    generated_at TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    reason TEXT,
+    recommendation_count INTEGER NOT NULL,
+    estimated_cost_improvement REAL,
+    baseline_cost REAL,
+    optimized_cost REAL,
+    plan_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_history_time
+    ON plan_history(generated_at);
 """
 
 
@@ -504,6 +547,372 @@ class HistoryReader:
                     }
                 )
         return result
+
+    def grid_minute_buckets(
+        self,
+        *,
+        since: str,
+        until: str,
+    ) -> list[dict[str, Any]]:
+        """Return complete UTC-minute averages for financial accounting."""
+
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    CAST(strftime('%s', observed_at) AS INTEGER) / 60 AS bucket,
+                    AVG(value_num), COUNT(*)
+                FROM measurements
+                WHERE name = 'grid.active_power'
+                  AND value_num IS NOT NULL
+                  AND observed_at >= ?
+                  AND observed_at < ?
+                GROUP BY bucket
+                ORDER BY bucket
+                """,
+                (since, until),
+            ).fetchall()
+        return [
+            {
+                "period_start": dt.datetime.fromtimestamp(
+                    int(row[0]) * 60,
+                    tz=dt.timezone.utc,
+                ).isoformat(),
+                "average_grid_power_w": float(row[1]),
+                "samples": int(row[2]),
+            }
+            for row in rows
+        ]
+
+    def latest_financial_period(self) -> str | None:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT MAX(period_start) FROM financial_intervals"
+            ).fetchone()
+        return row[0] if row and row[0] else None
+
+    def financial_day_state(self, local_date: str) -> dict[str, Any]:
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT local_hour, imported_kwh, exported_kwh, export_period
+                FROM financial_intervals
+                WHERE local_date = ?
+                """,
+                (local_date,),
+            ).fetchall()
+            adjustments = {
+                row[0]: float(row[1])
+                for row in connection.execute(
+                    """
+                    SELECT kind, amount FROM financial_adjustments
+                    WHERE local_date = ?
+                    """,
+                    (local_date,),
+                )
+            }
+        zerohero_import = {hour: 0.0 for hour in (18, 19, 20)}
+        zerohero_minutes = {hour: 0 for hour in (18, 19, 20)}
+        super_export_kwh = 0.0
+        for hour, imported, exported, export_period in rows:
+            if hour in zerohero_import:
+                zerohero_import[hour] += float(imported)
+                zerohero_minutes[hour] += 1
+            if export_period == "super_export":
+                super_export_kwh += float(exported)
+        return {
+            "intervals": len(rows),
+            "super_export_kwh": super_export_kwh,
+            "zerohero_import_kwh": zerohero_import,
+            "zerohero_minutes": zerohero_minutes,
+            "adjustments": adjustments,
+        }
+
+    def record_financial_intervals(
+        self,
+        intervals: list[dict[str, Any]],
+    ) -> None:
+        if not intervals:
+            return
+        with sqlite3.connect(self.path) as connection:
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO financial_intervals (
+                    period_start, local_date, local_hour,
+                    average_grid_power_w, imported_kwh, exported_kwh,
+                    import_price_per_kwh, export_price_per_kwh,
+                    import_cost, export_credit, net_energy_cost, samples,
+                    import_period, export_period, plan_id
+                ) VALUES (
+                    :period_start, :local_date, :local_hour,
+                    :average_grid_power_w, :imported_kwh, :exported_kwh,
+                    :import_price_per_kwh, :export_price_per_kwh,
+                    :import_cost, :export_credit, :net_energy_cost, :samples,
+                    :import_period, :export_period, :plan_id
+                )
+                """,
+                intervals,
+            )
+            connection.commit()
+
+    def record_financial_adjustment(
+        self,
+        *,
+        local_date: str,
+        kind: str,
+        occurred_at: str,
+        amount: float,
+        description: str,
+        plan_id: str,
+    ) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO financial_adjustments (
+                    local_date, kind, occurred_at, amount, description, plan_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    local_date,
+                    kind,
+                    occurred_at,
+                    amount,
+                    description,
+                    plan_id,
+                ),
+            )
+            connection.commit()
+
+    def financial_history(
+        self,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        bucket_seconds: int = 3600,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if not 60 <= bucket_seconds <= 2678400:
+            raise ValueError(
+                "financial bucket_seconds must be between 60 and 2678400"
+            )
+        clauses = ["1 = 1"]
+        values: list[Any] = [bucket_seconds]
+        adjustment_clauses = ["1 = 1"]
+        adjustment_values: list[Any] = [bucket_seconds]
+        if since:
+            clauses.append("period_start >= ?")
+            values.append(since)
+            adjustment_clauses.append("occurred_at >= ?")
+            adjustment_values.append(since)
+        if until:
+            clauses.append("period_start <= ?")
+            values.append(until)
+            adjustment_clauses.append("occurred_at <= ?")
+            adjustment_values.append(until)
+        bounded_limit = max(1, min(limit, 10000))
+        values.append(bounded_limit)
+        adjustment_values.append(bounded_limit)
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    CAST(strftime('%s', period_start) AS INTEGER) / ? AS bucket,
+                    SUM(imported_kwh), SUM(exported_kwh),
+                    SUM(import_cost), SUM(export_credit),
+                    SUM(net_energy_cost), SUM(samples),
+                    COUNT(*),
+                    AVG(import_price_per_kwh), AVG(export_price_per_kwh)
+                FROM financial_intervals
+                WHERE {' AND '.join(clauses)}
+                GROUP BY bucket
+                ORDER BY bucket DESC
+                LIMIT ?
+                """,
+                values,
+            ).fetchall()
+            adjustment_rows = connection.execute(
+                f"""
+                SELECT
+                    CAST(strftime('%s', occurred_at) AS INTEGER) / ? AS bucket,
+                    SUM(amount)
+                FROM financial_adjustments
+                WHERE {' AND '.join(adjustment_clauses)}
+                GROUP BY bucket
+                ORDER BY bucket DESC
+                LIMIT ?
+                """,
+                adjustment_values,
+            ).fetchall()
+        adjustments = {int(row[0]): float(row[1]) for row in adjustment_rows}
+        result = []
+        seen: set[int] = set()
+        for row in rows:
+            bucket = int(row[0])
+            seen.add(bucket)
+            adjustment = adjustments.get(bucket, 0.0)
+            result.append(
+                {
+                    "period_start": dt.datetime.fromtimestamp(
+                        bucket * bucket_seconds,
+                        tz=dt.timezone.utc,
+                    ).isoformat(),
+                    "imported_kwh": float(row[1] or 0),
+                    "exported_kwh": float(row[2] or 0),
+                    "import_cost": float(row[3] or 0),
+                    "export_credit": float(row[4] or 0),
+                    "energy_net_cost": float(row[5] or 0),
+                    "adjustments": adjustment,
+                    "net_cost": float(row[5] or 0) + adjustment,
+                    "samples": int(row[6] or 0),
+                    "intervals": int(row[7] or 0),
+                    "average_import_price_per_kwh": float(row[8] or 0),
+                    "average_export_price_per_kwh": float(row[9] or 0),
+                }
+            )
+        for bucket, adjustment in adjustments.items():
+            if bucket not in seen:
+                result.append(
+                    {
+                        "period_start": dt.datetime.fromtimestamp(
+                            bucket * bucket_seconds,
+                            tz=dt.timezone.utc,
+                        ).isoformat(),
+                        "imported_kwh": 0.0,
+                        "exported_kwh": 0.0,
+                        "import_cost": 0.0,
+                        "export_credit": 0.0,
+                        "energy_net_cost": 0.0,
+                        "adjustments": adjustment,
+                        "net_cost": adjustment,
+                        "samples": 0,
+                        "intervals": 0,
+                        "average_import_price_per_kwh": 0.0,
+                        "average_export_price_per_kwh": 0.0,
+                    }
+                )
+        return sorted(
+            result,
+            key=lambda item: item["period_start"],
+            reverse=True,
+        )[:bounded_limit]
+
+    def financial_summary(
+        self,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> dict[str, Any]:
+        history = self.financial_history(
+            since=since,
+            until=until,
+            bucket_seconds=2678400,
+            limit=10000,
+        )
+        keys = (
+            "imported_kwh",
+            "exported_kwh",
+            "import_cost",
+            "export_credit",
+            "energy_net_cost",
+            "adjustments",
+            "net_cost",
+        )
+        result = {
+            key: round(sum(float(row[key]) for row in history), 6)
+            for key in keys
+        }
+        result.update(
+            {
+                "since": since,
+                "until": until,
+                "intervals": sum(int(row["intervals"]) for row in history),
+                "cost_payable": round(max(0.0, result["net_cost"]), 6),
+                "net_profit": round(max(0.0, -result["net_cost"]), 6),
+                "gross_export_revenue": result["export_credit"],
+                "realized_daemon_savings": None,
+                "model": (
+                    "minute-average authoritative grid accounting; includes "
+                    "daily supply and earned ZEROHERO credit; realized daemon "
+                    "savings unavailable while control is shadow-only"
+                ),
+            }
+        )
+        return result
+
+    def record_plan(self, plan: dict[str, Any]) -> None:
+        generated_at = plan.get("generated_at")
+        if not generated_at:
+            return
+        simulation = plan.get("simulation") or {}
+        baseline = simulation.get("baseline") or {}
+        optimized = simulation.get("optimized") or {}
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO plan_history (
+                    generated_at, status, mode, reason,
+                    recommendation_count, estimated_cost_improvement,
+                    baseline_cost, optimized_cost, plan_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    generated_at,
+                    str(plan.get("status", "unknown")),
+                    str(plan.get("mode", "shadow")),
+                    plan.get("reason"),
+                    len(plan.get("recommendations") or []),
+                    simulation.get("estimated_cost_improvement"),
+                    baseline.get("cost"),
+                    optimized.get("cost"),
+                    json.dumps(plan, separators=(",", ":")),
+                ),
+            )
+            connection.commit()
+
+    def plans(
+        self,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 200,
+        include_plan: bool = False,
+    ) -> list[dict[str, Any]]:
+        clauses = ["1 = 1"]
+        values: list[Any] = []
+        if since:
+            clauses.append("generated_at >= ?")
+            values.append(since)
+        if until:
+            clauses.append("generated_at <= ?")
+            values.append(until)
+        values.append(max(1, min(limit, 1000)))
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT generated_at, status, mode, reason,
+                       recommendation_count, estimated_cost_improvement,
+                       baseline_cost, optimized_cost, plan_json
+                FROM plan_history
+                WHERE {' AND '.join(clauses)}
+                ORDER BY generated_at DESC
+                LIMIT ?
+                """,
+                values,
+            ).fetchall()
+        return [
+            {
+                "generated_at": row[0],
+                "status": row[1],
+                "mode": row[2],
+                "reason": row[3],
+                "recommendation_count": row[4],
+                "estimated_cost_improvement": row[5],
+                "baseline_cost": row[6],
+                "optimized_cost": row[7],
+                **({"plan": json.loads(row[8])} if include_plan else {}),
+            }
+            for row in rows
+        ]
 
 
 class StorageMaintainer:

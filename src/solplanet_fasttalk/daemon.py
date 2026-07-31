@@ -8,6 +8,7 @@ import threading
 import time
 from pathlib import Path
 
+from .accounting import FinancialAccountingWorker
 from .api import API
 from .asw import ASWWorker
 from .config import DaemonConfig
@@ -108,6 +109,19 @@ class Daemon:
             self._thread("forecast-solar", worker.run)
         else:
             self.state.update_health("forecast_solar", status="disabled")
+        if self.tariff is not None:
+            worker = FinancialAccountingWorker(
+                self.history,
+                self.tariff,
+                self.state,
+                raw_retention_days=self.config.storage.raw_retention_days,
+            )
+            self._thread("financial-accounting", worker.run)
+        else:
+            self.state.update_health(
+                "financial_accounting",
+                status="disabled",
+            )
         if self.plans is not None and self.forecast is not None and self.tariff:
             worker = OptimisationWorker(
                 self.config.optimisation,

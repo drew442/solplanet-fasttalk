@@ -9,6 +9,7 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from solplanet_fasttalk.asw import POLL_GROUPS, decode_group as decode_asw
+from solplanet_fasttalk.accounting import FinancialAccountingWorker
 from solplanet_fasttalk.config import (
     ForecastPlane,
     ForecastSolarConfig,
@@ -25,6 +26,7 @@ from solplanet_fasttalk.forecast import (
 from solplanet_fasttalk.model import Measurement, PlantState
 from solplanet_fasttalk.optimisation import (
     ForecastSlot,
+    NativeBaseline,
     OptimisationWorker,
     PlanStore,
     simulate_plan,
@@ -334,6 +336,51 @@ class Phase5Tests(unittest.TestCase):
             self.assertEqual(worker.persistence_failures, 1)
             self.assertTrue(cache.is_file())
 
+    def test_financial_ledger_applies_daily_and_earned_zerohero_credit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "history.sqlite3")
+            initialize_database(database)
+            local_start = dt.datetime(
+                2026, 6, 1, 18, 0, tzinfo=self.sydney
+            )
+            with sqlite3.connect(database) as connection:
+                connection.executemany(
+                    """
+                    INSERT INTO measurements (
+                        observed_at, name, value_num, value_text, unit,
+                        quality, source, authority, access_mode, metadata_json
+                    ) VALUES (?, 'grid.active_power', 0, NULL, 'W', 'good',
+                              'eastron.grid', 'authoritative', 'passive_bus', '{}')
+                    """,
+                    (
+                        (
+                            (
+                                local_start
+                                + dt.timedelta(minutes=minute)
+                            ).astimezone(dt.timezone.utc).isoformat(),
+                        )
+                        for minute in range(180)
+                    )
+                )
+                connection.commit()
+            history = HistoryReader(database)
+            worker = FinancialAccountingWorker(
+                history,
+                self.tariff,
+                PlantState(),
+                raw_retention_days=14,
+            )
+            written = worker.run_once(
+                dt.datetime(2026, 6, 1, 21, 1, tzinfo=self.sydney)
+            )
+            summary = history.financial_summary()
+            day = history.financial_day_state("2026-06-01")
+
+        self.assertEqual(written, 180)
+        self.assertEqual(day["adjustments"]["daily_supply"], 1.65)
+        self.assertEqual(day["adjustments"]["zerohero_credit"], -1.0)
+        self.assertAlmostEqual(summary["net_cost"], 0.65)
+
 
 class Phase6Tests(unittest.TestCase):
     def test_shadow_simulation_is_constrained_and_improves_cost(self):
@@ -411,6 +458,69 @@ class Phase6Tests(unittest.TestCase):
         self.assertEqual(plan["status"], "no_action")
         self.assertEqual(plan["control_commands_sent"], 0)
         self.assertIn("battery.soc", plan["reason"])
+
+    def test_native_charge_command_is_the_no_change_baseline(self):
+        tariff = ZeroHeroTariff(TariffConfig())
+        config = OptimisationConfig(
+            enabled=True,
+            battery_capacity_kwh=10,
+            reserve_soc_percent=10,
+            maximum_soc_percent=90,
+        )
+        slot = ForecastSlot(
+            dt.datetime(2026, 6, 1, 12, 0, tzinfo=ZoneInfo("Australia/Sydney")),
+            1000,
+            1000,
+        )
+        result = simulate_plan(
+            config,
+            tariff,
+            [slot],
+            initial_soc_percent=50,
+            charge_limit_w=50000,
+            discharge_limit_w=50000,
+            native_baseline=NativeBaseline(
+                mode="charge",
+                requested_power_w=12000,
+                minimum_soc_percent=10,
+                maximum_soc_percent=100,
+                source="test",
+                assumption="persist",
+            ),
+        )
+        recommendation = result["recommendations"][0]
+        self.assertEqual(recommendation["baseline_battery_power_w"], -12000)
+        self.assertEqual(recommendation["baseline_grid_power_w"], 12000)
+        self.assertEqual(
+            recommendation["constraints"]["charge_limit_w"],
+            12000,
+        )
+        self.assertEqual(
+            result["simulation"]["baseline"]["policy"]["mode"],
+            "charge",
+        )
+
+    def test_plan_history_persists_summary_and_full_workings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "history.sqlite3")
+            initialize_database(database)
+            history = HistoryReader(database)
+            plan = {
+                "generated_at": "2026-06-01T00:00:00+00:00",
+                "status": "ready",
+                "mode": "shadow",
+                "recommendations": [{"action": "hold"}],
+                "simulation": {
+                    "baseline": {"cost": 2.0},
+                    "optimized": {"cost": 1.5},
+                    "estimated_cost_improvement": 0.5,
+                },
+            }
+            history.record_plan(plan)
+            stored = history.plans(include_plan=True)[0]
+
+        self.assertEqual(stored["estimated_cost_improvement"], 0.5)
+        self.assertEqual(stored["plan"]["recommendations"][0]["action"], "hold")
 
 
 if __name__ == "__main__":

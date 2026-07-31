@@ -210,9 +210,12 @@ The implemented local API currently includes plant state, current/raw/rollup
 history, devices, capabilities, health, events, server-sent events, the
 pre-July 2026 ZEROHERO tariff, two-plane Forecast.Solar output,
 forecast-versus-actual history, shadow plans and Prometheus-format service
-metrics. A responsive, read-only [diagnostics web UI](docs/diagnostics-webui.md)
-shows current and historical plant flow, forecasts, recommendations and the
-evidence behind the optimiser's decisions. See
+metrics. It also persists actual tariff cost/revenue and optimiser decision
+history, publishes future tariff prices, and compares each proposal with
+continued operation of the inverter's current native mode. A responsive,
+read-only [diagnostics web UI](docs/diagnostics-webui.md) shows current and
+historical plant flow, financials, forecast accuracy, forecasts,
+recommendations and the evidence behind the optimiser's decisions. See
 [phases 3–6](docs/phases-3-to-6.md) for exact daemon behaviour.
 
 ## Reliability and security

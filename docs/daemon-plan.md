@@ -375,8 +375,12 @@ GET  /v1/measurements/history
 GET  /v1/devices
 GET  /v1/health
 GET  /v1/tariffs/current
+GET  /v1/tariffs/forecast
 GET  /v1/forecasts/pv
 GET  /v1/plans/current
+GET  /v1/plans/history
+GET  /v1/financials/history
+GET  /v1/financials/summary
 GET  /v1/diagnostics
 GET  /v1/events
 GET  /v1/stream

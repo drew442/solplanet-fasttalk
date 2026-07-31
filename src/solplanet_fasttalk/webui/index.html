@@ -183,6 +183,9 @@
         <p class="safety-note">
           Recommendation only. The daemon has no command execution capability.
         </p>
+        <p id="baselinePolicy" class="panel-intro">
+          Baseline: waiting for the inverter's native operating mode.
+        </p>
       </article>
     </section>
 
@@ -218,6 +221,36 @@
       <div class="chart-wrap chart-wrap--small">
         <svg id="historySocChart" class="line-chart" role="img" aria-label="Historical battery state of charge"></svg>
       </div>
+
+      <div class="schedule-head">
+        <div><p class="eyebrow">ACTUAL COST</p><h3>Tariff accounting</h3></div>
+        <span class="quiet">Authoritative grid meter</span>
+      </div>
+      <div class="accuracy-numbers">
+        <div><span>Today</span><strong id="costToday">—</strong></div>
+        <div><span>This month</span><strong id="costMonth">—</strong></div>
+        <div><span>Month import / export</span><strong id="monthEnergy">—</strong></div>
+      </div>
+      <div class="chart-wrap chart-wrap--small">
+        <svg id="costHistoryChart" class="line-chart" role="img" aria-label="Historical electricity cost and export revenue"></svg>
+      </div>
+
+      <div class="schedule-head">
+        <div><p class="eyebrow">FORECAST ACCURACY</p><h3>Predicted versus actual PV</h3></div>
+        <span id="accuracyHistorySummary" class="quiet">—</span>
+      </div>
+      <div class="chart-wrap chart-wrap--small">
+        <svg id="accuracyHistoryChart" class="line-chart" role="img" aria-label="Historical PV forecast accuracy"></svg>
+      </div>
+
+      <div class="schedule-head">
+        <div><p class="eyebrow">DECISION HISTORY</p><h3>Past optimiser workings</h3></div>
+        <span id="planHistoryCount" class="quiet">—</span>
+      </div>
+      <div class="chart-wrap chart-wrap--small">
+        <svg id="planCostHistoryChart" class="line-chart" role="img" aria-label="Historical native baseline and optimized plan costs"></svg>
+      </div>
+      <div id="planHistory" class="schedule-list"></div>
     </section>
 
     <section id="future" class="panel chart-panel section-anchor">
@@ -237,7 +270,7 @@
         <span><i class="legend-load"></i>Forecast consumption</span>
         <span><i class="legend-solar"></i>Forecast PV</span>
         <span><i class="legend-plan"></i>Expected grid</span>
-        <span><i class="legend-baseline"></i>Grid without schedule</span>
+        <span><i class="legend-baseline"></i>Grid if native command continues</span>
       </div>
       <div class="chart-wrap">
         <svg id="futureChart" class="line-chart" role="img" aria-label="Forecast power and schedule chart"></svg>
@@ -245,10 +278,18 @@
       </div>
 
       <div class="subchart-head">
-        <span>Forecast battery state of charge</span><strong id="futureSocEnd">—</strong>
+        <span>Forecast SOC: recommendation and native-command baseline</span><strong id="futureSocEnd">—</strong>
       </div>
       <div class="chart-wrap chart-wrap--small">
         <svg id="futureSocChart" class="line-chart" role="img" aria-label="Forecast battery state of charge"></svg>
+      </div>
+
+      <div class="schedule-head">
+        <div><p class="eyebrow">FUTURE PRICE</p><h3>Import and export tariff</h3></div>
+        <span class="quiet">Pre-July 2026 ZEROHERO model</span>
+      </div>
+      <div class="chart-wrap chart-wrap--small">
+        <svg id="tariffFutureChart" class="line-chart" role="img" aria-label="Future import and export tariff prices"></svg>
       </div>
 
       <div class="schedule-head">

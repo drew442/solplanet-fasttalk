@@ -27,7 +27,11 @@ browsers.
 - selectable 6-hour, 24-hour, 7-day and 30-day power charts;
 - grid power with positive import and negative export;
 - site consumption, external-PV AC and Solplanet AC power;
-- battery SOC; and
+- battery SOC;
+- actual import cost, export revenue and net cost history;
+- today and month-to-date energy/cost totals;
+- historical PV forecast-versus-actual graphs;
+- persisted optimiser decisions and their modelled improvements; and
 - recent daemon events.
 
 The browser requests time-bucketed averages from SQLite. It does not transfer
@@ -38,9 +42,12 @@ count, minimum and maximum for diagnostics.
 
 - forecast load and combined east/west PV;
 - expected grid power with the shadow schedule;
-- the grid baseline without that schedule;
-- forecast battery SOC; and
-- the upcoming charge, discharge and hold recommendations.
+- grid and SOC baselines produced by continuing the inverter's currently
+  stored native operating mode and power command;
+- forecast battery SOC;
+- future import and export tariff prices; and
+- upcoming charge, discharge and hold recommendations with their interval
+  prices.
 
 ### Workings
 
@@ -48,6 +55,12 @@ The decision pipeline exposes the optimiser's observations, forecast method,
 freshness, BMS-derived power limits, configured SOC/site constraints, tariff
 period and forecast-versus-authoritative-actual comparison. A missing or stale
 required input is shown as a no-action reason rather than hidden.
+
+The baseline is explicitly an estimate, not a claim about hidden inverter
+logic. It assumes the fresh native charge/hold/discharge command persists until
+the native SOC bound and states that future native schedule changes are
+unknown. Hardware-limit evidence distinguishes the ASW12kH-T3 12 kW battery
+rating from its inapplicable 10-second EPS overload rating.
 
 The UI never implies that a shadow recommendation has been executed. It
 repeats that command execution is unavailable and the daemon has sent zero
@@ -177,6 +190,10 @@ committed to the repository.
 ```text
 GET /v1/diagnostics
 GET /v1/measurements/history?name=...&since=...&until=...&bucket_seconds=...
+GET /v1/tariffs/forecast?hours=...&step_minutes=...
+GET /v1/financials/history?since=...&until=...&bucket_seconds=...
+GET /v1/financials/summary?since=...&until=...
+GET /v1/plans/history?since=...&until=...
 ```
 
 `/v1/diagnostics` returns one coherent browser refresh payload containing the

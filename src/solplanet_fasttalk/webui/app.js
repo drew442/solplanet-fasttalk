@@ -10,6 +10,12 @@ const state = {
   historyTimer: null,
   refreshTimer: null,
   sparks: { grid: [], load: [], solar: [] },
+  historical: {
+    financials: [],
+    forecastComparison: [],
+    plans: [],
+    tariff: [],
+  },
 };
 
 const ranges = {
@@ -55,6 +61,14 @@ function formatMoney(value) {
   if (numeric === null) return "—";
   const sign = numeric < 0 ? "−" : "";
   return `${sign}$${Math.abs(numeric).toFixed(2)}`;
+}
+
+function formatNetCost(value) {
+  const numeric = number(value);
+  if (numeric === null) return "—";
+  return numeric < 0
+    ? `$${Math.abs(numeric).toFixed(2)} profit`
+    : `$${numeric.toFixed(2)} cost`;
 }
 
 function formatPrice(value) {
@@ -233,6 +247,7 @@ function renderRecommendation() {
     setText("expectedGrid", "—");
     setText("expectedSoc", "—");
     setText("estimatedSaving", "—");
+    setText("baselinePolicy", "Baseline: native inverter mode unavailable.");
     return;
   }
 
@@ -255,6 +270,13 @@ function renderRecommendation() {
   setText("expectedGrid", formatPower(recommendation.expected_grid_power_w, true));
   setText("expectedSoc", formatPercent(recommendation.expected_soc_percent));
   setText("estimatedSaving", formatMoney(plan?.simulation?.estimated_cost_improvement));
+  const policy = plan?.simulation?.baseline?.policy;
+  setText(
+    "baselinePolicy",
+    policy
+      ? `No-change baseline: native ${policy.mode} at ${formatPower(policy.requested_power_w)} until ${formatPercent(policy.minimum_soc_percent)}–${formatPercent(policy.maximum_soc_percent)} bounds.`
+      : "No-change baseline: native inverter mode unavailable.",
+  );
 }
 
 function renderHealth() {
@@ -426,6 +448,7 @@ function renderSchedule() {
       element("span", "", `${formatPower(Math.abs(item.battery_power_w))} battery`),
       element("span", "", `${formatPower(item.expected_grid_power_w, true)} grid`),
       element("span", "", formatPercent(item.expected_soc_percent)),
+      element("span", "", `${formatPrice(item.import_price_per_kwh)} / ${formatPrice(item.export_price_per_kwh)}`),
     );
     return row;
   });
@@ -453,6 +476,14 @@ function renderSchedule() {
       timestamp: item.timestamp,
       value: number(item.expected_soc_percent),
     })).filter((item) => item.value !== null),
+  }, {
+    label: "Native baseline SOC",
+    color: "#9ba39e",
+    dash: "5 5",
+    points: recommendations.map((item) => ({
+      timestamp: item.timestamp,
+      value: number(item.baseline_expected_soc_percent),
+    })).filter((item) => item.value !== null),
   }];
   renderChart("futureChart", futureSeries, { includeZero: true });
   renderChart("futureSocChart", socSeries, { percent: true });
@@ -461,6 +492,26 @@ function renderSchedule() {
     "futureSocEnd",
     recommendations.length ? formatPercent(recommendations.at(-1).expected_soc_percent) : "—",
   );
+
+  const tariffPoints = state.historical.tariff || [];
+  renderChart("tariffFutureChart", [
+    {
+      label: "Import",
+      color: "#b86242",
+      points: tariffPoints.map((item) => ({
+        timestamp: item.timestamp,
+        value: number(item.import_price_per_kwh),
+      })).filter((item) => item.value !== null),
+    },
+    {
+      label: "Export",
+      color: "#3e8b68",
+      points: tariffPoints.map((item) => ({
+        timestamp: item.timestamp,
+        value: number(item.export_price_per_kwh),
+      })).filter((item) => item.value !== null),
+    },
+  ], { price: true, includeZero: true });
 }
 
 function svgNode(tag, attributes = {}) {
@@ -506,7 +557,13 @@ function renderChart(id, series, options = {}) {
     const py = y(value);
     svg.append(svgNode("line", { x1: margin.left, y1: py, x2: width - margin.right, y2: py, class: "chart-grid" }));
     const label = svgNode("text", { x: margin.left - 8, y: py + 3, "text-anchor": "end", class: "chart-label" });
-    label.textContent = options.percent ? `${Math.round(value)}%` : `${(value / 1000).toFixed(1)}k`;
+    label.textContent = options.percent
+      ? `${Math.round(value)}%`
+      : options.currency
+        ? `$${value.toFixed(2)}`
+        : options.price
+          ? `${(value * 100).toFixed(0)}c`
+          : `${(value / 1000).toFixed(1)}k`;
     svg.append(label);
   }
   if (minY < 0 && maxY > 0) {
@@ -550,7 +607,7 @@ function renderSpark(id, values) {
 async function loadHistory() {
   const range = ranges[state.range];
   const since = new Date(Date.now() - range.milliseconds).toISOString();
-  const results = await Promise.all(powerSeries.concat([["battery.soc", "SOC", "#7a638c"]]).map(
+  const measurementPromise = Promise.all(powerSeries.concat([["battery.soc", "SOC", "#7a638c"]]).map(
     async ([name, label, color]) => {
       const query = new URLSearchParams({
         name,
@@ -569,11 +626,135 @@ async function loadHistory() {
       };
     },
   ));
+  const common = new URLSearchParams({ since, limit: "2000" });
+  const financialQuery = new URLSearchParams({
+    since,
+    bucket_seconds: String(Math.max(3600, range.bucket)),
+    limit: "2000",
+  });
+  const [results, financialPayload, forecastPayload, planPayload, tariffPayload] = await Promise.all([
+    measurementPromise,
+    api(`/financials/history?${financialQuery}`),
+    api(`/forecasts/pv?${common}`).catch(() => ({ historical_comparison: [] })),
+    api(`/plans/history?${common}`),
+    api("/tariffs/forecast?hours=48&step_minutes=15").catch(() => ({ points: [] })),
+  ]);
+  state.historical.financials = financialPayload.financials || [];
+  state.historical.forecastComparison = forecastPayload.historical_comparison || [];
+  state.historical.plans = planPayload.plans || [];
+  state.historical.tariff = tariffPayload.points || [];
   renderChart("historyChart", results.slice(0, 4), { includeZero: true });
   renderChart("historySocChart", [results[4]], { percent: true });
   $("historyEmpty").hidden = results.slice(0, 4).some((item) => item.points.length);
   const latestSoc = [...results[4].points].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0];
   setText("historySocLatest", latestSoc ? `${formatPercent(latestSoc.value)} latest` : "—");
+  renderHistoricalInsights();
+  renderSchedule();
+}
+
+function renderHistoricalInsights() {
+  const financials = state.historical.financials || [];
+  renderChart("costHistoryChart", [
+    {
+      label: "Import cost",
+      color: "#b86242",
+      points: financials.map((item) => ({
+        timestamp: item.period_start,
+        value: number(item.import_cost),
+      })).filter((item) => item.value !== null),
+    },
+    {
+      label: "Export revenue",
+      color: "#3e8b68",
+      points: financials.map((item) => ({
+        timestamp: item.period_start,
+        value: -(number(item.export_credit) || 0),
+      })),
+    },
+    {
+      label: "Net cost",
+      color: "#76557f",
+      points: financials.map((item) => ({
+        timestamp: item.period_start,
+        value: number(item.net_cost),
+      })).filter((item) => item.value !== null),
+    },
+  ], { currency: true, includeZero: true });
+
+  const today = state.snapshot?.financials?.today;
+  const month = state.snapshot?.financials?.month;
+  setText("costToday", formatNetCost(today?.net_cost));
+  setText("costMonth", formatNetCost(month?.net_cost));
+  setText(
+    "monthEnergy",
+    month
+      ? `${Number(month.imported_kwh || 0).toFixed(1)} / ${Number(month.exported_kwh || 0).toFixed(1)} kWh`
+      : "—",
+  );
+
+  const comparison = state.historical.forecastComparison || [];
+  renderChart("accuracyHistoryChart", [
+    {
+      label: "Forecast PV",
+      color: "#d9a629",
+      points: comparison.map((item) => ({
+        timestamp: item.forecast_at,
+        value: number(item.forecast_power_w),
+      })).filter((item) => item.value !== null),
+    },
+    {
+      label: "Actual PV",
+      color: "#3e8b68",
+      points: comparison.map((item) => ({
+        timestamp: item.forecast_at,
+        value: number(item.actual_power_w),
+      })).filter((item) => item.value !== null),
+    },
+  ], { includeZero: true });
+  const errors = comparison.map((item) => Math.abs(number(item.error_w))).filter(Number.isFinite);
+  setText(
+    "accuracyHistorySummary",
+    errors.length
+      ? `${formatPower(errors.reduce((sum, value) => sum + value, 0) / errors.length)} mean absolute error`
+      : "No matched history",
+  );
+
+  const plans = state.historical.plans || [];
+  setText("planHistoryCount", `${plans.length} decisions`);
+  renderChart("planCostHistoryChart", [
+    {
+      label: "Native baseline cost",
+      color: "#9ba39e",
+      dash: "5 5",
+      points: plans.map((item) => ({
+        timestamp: item.generated_at,
+        value: number(item.baseline_cost),
+      })).filter((item) => item.value !== null),
+    },
+    {
+      label: "Recommended-plan cost",
+      color: "#76557f",
+      points: plans.map((item) => ({
+        timestamp: item.generated_at,
+        value: number(item.optimized_cost),
+      })).filter((item) => item.value !== null),
+    },
+  ], { currency: true, includeZero: true });
+  const planRows = plans.slice(0, 12).map((plan) => {
+    const row = element("div", "schedule-row");
+    row.append(
+      element("time", "", formatTime(plan.generated_at, true)),
+      element("strong", "", title(plan.status)),
+      element("span", "", `${plan.recommendation_count} intervals`),
+      element("span", "", plan.reason || "Plan generated"),
+      element("span", "", `Δ ${formatMoney(plan.estimated_cost_improvement)}`),
+    );
+    return row;
+  });
+  if (!planRows.length) {
+    planRows.push(element("p", "quiet", "No persisted optimiser decisions in this range."));
+  }
+  $("planHistory").replaceChildren(...planRows);
 }
 
 function renderAll() {

@@ -20,9 +20,9 @@ Fresh grid, external-PV and ASW measurements derive:
 
 All derived values are withdrawn when a required input is missing, invalid or
 stale. SQLite uses WAL mode and stores raw measurements, events, forecast
-points, hourly rollups and daily rollups. Retention is independently
-configurable. The latest cumulative energy counters remain available as restart
-baselines.
+points, hourly rollups, daily rollups, minute tariff-accounting intervals and
+complete shadow-plan decisions. The latest cumulative energy counters remain
+available as restart baselines.
 
 History accepts `resolution=raw`, `resolution=hourly` or `resolution=daily`.
 Service metrics are exposed in Prometheus text format at `/metrics`.
@@ -70,6 +70,16 @@ Manually confirmed events may be supplied in a target-only JSON file. Tariff
 lookup uses `Australia/Sydney` and aware datetimes, including deterministic
 handling of both folds when daylight saving ends.
 
+Completed UTC-minute averages of authoritative `grid.active_power` are priced
+into a persistent ledger. Positive power is import and negative power is
+export. The ledger records applicable import/export periods and prices, energy,
+import cost, export credit, net cost, sample coverage and tariff plan ID. It
+also applies the daily supply charge once per observed local day, the 15 kWh
+daily Super Export cap, and the $1 ZEROHERO credit only after all three local
+hours have all 60 accounted minutes and each remains at or below the
+0.03 kWh import threshold. Historical gaps remain gaps rather than being
+interpolated.
+
 ## Forecast.Solar
 
 The adapter uses a key file and a separate location file. Neither the key nor
@@ -109,15 +119,35 @@ resulting SOC, hardware/configured limits and a human-readable explanation.
 The constraints include:
 
 - observed battery voltage and BMS charge/discharge current limits;
+- the ASW12kH-T3 manufacturer battery charge/discharge rating of 12 kW;
 - configured inverter charge/discharge power limits;
 - usable capacity, reserve SOC and maximum SOC;
 - charge and discharge efficiency; and
 - configured site import/export boundaries.
 
-Observed BMS limits can only reduce configured power limits. Missing or stale
+The effective interval limit is the lowest of the 12 kW manufacturer rating,
+the configured ceiling, and the live BMS voltage×current ceiling. Within that
+limit the planner uses the required safe power over the short interval; it does
+not spread an energy transfer across the entire horizon merely to reduce
+instantaneous power. The documented 24 kVA EPS overload rating is explicitly
+excluded because it applies for no more than 10 seconds and is not a battery
+dispatch rating.
+
+The no-daemon-change baseline is no longer an idle-battery assumption. When
+fresh values are available, it projects the ASW's currently stored
+charge/hold/discharge state and power command (Modbus registers 41152/41153)
+until the inverter's native lower or upper SOC bound. The API labels the
+assumption that this current command persists; it cannot predict an unknown
+future native schedule change. If the native command is unavailable, the
+baseline falls back visibly to hold.
+
+Observed BMS limits can only reduce the applicable power ceiling. Missing or stale
 SOC, authoritative grid power, derived site load or PV forecast produces an
 empty `no_action` plan. The optimiser has no serial transport reference and
 reports `control_commands_sent: 0` and `execution_available: false`.
+Every ready, infeasible and no-action decision is stored with its inputs,
+recommendations, explanations, native baseline, costs and constraint
+provenance.
 
 Historical data can be replayed without hardware:
 
@@ -139,9 +169,13 @@ The phase-6 read-only API includes:
 ```text
 GET /v1/capabilities
 GET /v1/tariffs/current
+GET /v1/tariffs/forecast
 GET /v1/forecasts/pv
 GET /v1/forecasts/pv?since=...&until=...
 GET /v1/plans/current
+GET /v1/plans/history
+GET /v1/financials/history
+GET /v1/financials/summary
 GET /v1/diagnostics
 GET /v1/measurements/history?name=...&bucket_seconds=...
 GET /metrics
