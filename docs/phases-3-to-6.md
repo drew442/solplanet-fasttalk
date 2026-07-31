@@ -213,3 +213,26 @@ invariants:
 
 The canary was stopped cleanly after validation. This result supports continued
 shadow-mode soaking; it does not satisfy or bypass any phase-7 control gate.
+
+A subsequent version-0.4.0 canary at code commit `06f40cd` validated the
+completed diagnostics path against the same live plant:
+
+- the native baseline read the stored ASW charge state, 12 kW command and
+  native 10%–100% SOC bounds;
+- the effective charge and discharge ceilings were 12 kW, with both
+  manufacturer provenance and live-BMS/configured reductions exposed;
+- a 59-interval shadow plan, future tariff series, financial ledger and plan
+  history were available through their read-only endpoints;
+- actual tariff accounting backfilled the available authoritative grid
+  history and explicitly reported realized daemon savings as unavailable in
+  shadow mode;
+- an initial concurrent SQLite-write collision was reproduced, fixed with
+  bounded low-frequency writer waits, and did not recur after redeployment;
+- all forecast, accounting, optimisation, storage and hardware components
+  reported healthy with no persistence failures, queue drops, serial failures,
+  reconnects, CRC errors, missing responses or Modbus exceptions; and
+- the plan continued to report zero control commands and no execution
+  capability.
+
+The LAN daemon was left running under its existing script-managed,
+authenticated configuration after the successful read-only canary.
