@@ -119,9 +119,9 @@ class Phase3Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = str(Path(directory) / "history.sqlite3")
             initialize_database(database)
-            observed = dt.datetime.now(dt.timezone.utc).replace(
-                minute=10, second=0, microsecond=0
-            )
+            observed = (
+                dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+            ).replace(minute=10, second=0, microsecond=0)
             with sqlite3.connect(database) as connection:
                 for offset, value in enumerate((100.0, 300.0)):
                     connection.execute(

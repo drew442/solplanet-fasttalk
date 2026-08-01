@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from queue import Empty
+from queue import Empty, Full
 from typing import Any
 
 from .model import Measurement, MeasurementQueue, utc_now
@@ -137,32 +137,33 @@ class HistoryWriter:
         self.queue = queue
         self.written = 0
         self.failures = 0
+        self.consecutive_failures = 0
 
     def run(self, stop: threading.Event) -> None:
         initialize_database(self.path)
-        with sqlite3.connect(self.path) as connection:
+        with sqlite3.connect(self.path, timeout=30.0) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=NORMAL")
-            pending = 0
+            shutdown_requested = False
             while not stop.is_set() or not self.queue.queue.empty():
                 try:
                     item = self.queue.queue.get(timeout=0.5)
                 except Empty:
-                    if pending:
-                        connection.commit()
-                        pending = 0
                     continue
                 if item is None:
                     break
+                batch = [item]
+                while len(batch) < 100:
+                    try:
+                        candidate = self.queue.queue.get_nowait()
+                    except Empty:
+                        break
+                    if candidate is None:
+                        shutdown_requested = True
+                        break
+                    batch.append(candidate)
                 try:
-                    number = (
-                        float(item.value)
-                        if isinstance(item.value, (int, float))
-                        and not isinstance(item.value, bool)
-                        else None
-                    )
-                    text = None if number is not None or item.value is None else str(item.value)
-                    connection.execute(
+                    connection.executemany(
                         """
                         INSERT INTO measurements (
                             observed_at, name, value_num, value_text, unit,
@@ -170,32 +171,55 @@ class HistoryWriter:
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            item.observed_at,
-                            item.name,
-                            number,
-                            text,
-                            item.unit,
-                            item.quality,
-                            item.source,
-                            item.authority,
-                            item.access_mode,
-                            json.dumps(item.metadata, separators=(",", ":")),
+                            self._row(measurement)
+                            for measurement in batch
                         ),
                     )
-                    self.written += 1
-                    pending += 1
-                    if pending >= 100:
-                        connection.commit()
-                        pending = 0
-                        # Give forecast/event writers a bounded opportunity to
-                        # acquire SQLite's single WAL write lock. Without this
-                        # handoff a continuously populated measurement queue
-                        # can immediately begin another transaction and starve
-                        # lower-frequency writers.
-                        time.sleep(0.01)
+                    connection.commit()
+                    self.written += len(batch)
+                    self.consecutive_failures = 0
+                    # Give lower-frequency forecast/accounting writers a
+                    # bounded opportunity to acquire SQLite's WAL write lock.
+                    time.sleep(0.01)
                 except sqlite3.Error:
+                    connection.rollback()
                     self.failures += 1
-            connection.commit()
+                    self.consecutive_failures += 1
+                    # A transient SQLite writer collision must not silently
+                    # discard telemetry. Requeue the complete rolled-back
+                    # batch; serial workers remain non-blocking and the queue
+                    # retains its existing bounded-drop behavior.
+                    for measurement in batch:
+                        try:
+                            self.queue.queue.put_nowait(measurement)
+                        except Full:
+                            self.queue.dropped += 1
+                    time.sleep(min(1.0, 0.05 * self.consecutive_failures))
+                    shutdown_requested = False
+                if shutdown_requested:
+                    break
+
+    @staticmethod
+    def _row(item: Measurement) -> tuple[Any, ...]:
+        number = (
+            float(item.value)
+            if isinstance(item.value, (int, float))
+            and not isinstance(item.value, bool)
+            else None
+        )
+        text = None if number is not None or item.value is None else str(item.value)
+        return (
+            item.observed_at,
+            item.name,
+            number,
+            text,
+            item.unit,
+            item.quality,
+            item.source,
+            item.authority,
+            item.access_mode,
+            json.dumps(item.metadata, separators=(",", ":")),
+        )
 
 
 class HistoryReader:
@@ -1010,10 +1034,36 @@ class StorageMaintainer:
 
     def run_once(self) -> None:
         with sqlite3.connect(self.path) as connection:
-            for seconds, pattern in (
-                (3600, "%Y-%m-%dT%H:00:00+00:00"),
-                (86400, "%Y-%m-%dT00:00:00+00:00"),
+            now = dt.datetime.now(dt.timezone.utc)
+            for seconds, pattern, retention_days in (
+                (
+                    3600,
+                    "%Y-%m-%dT%H:00:00+00:00",
+                    self.config.raw_retention_days,
+                ),
+                (
+                    86400,
+                    "%Y-%m-%dT00:00:00+00:00",
+                    self.config.raw_retention_days,
+                ),
             ):
+                latest = connection.execute(
+                    """
+                    SELECT MAX(period_start) FROM measurement_rollups
+                    WHERE period_seconds = ?
+                    """,
+                    (seconds,),
+                ).fetchone()[0]
+                cutoff_epoch = int(now.timestamp()) // seconds * seconds
+                cutoff = dt.datetime.fromtimestamp(
+                    cutoff_epoch,
+                    tz=dt.timezone.utc,
+                )
+                since = (
+                    dt_from_iso(latest) - dt.timedelta(seconds=seconds)
+                    if latest
+                    else cutoff - dt.timedelta(days=retention_days)
+                )
                 connection.execute(
                     """
                     INSERT OR REPLACE INTO measurement_rollups (
@@ -1039,9 +1089,19 @@ class StorageMaintainer:
                            MAX(source), MAX(authority)
                     FROM measurements
                     WHERE value_num IS NOT NULL
+                      AND observed_at >= ?
+                      AND observed_at < ?
                     GROUP BY strftime(?, observed_at), name
                     """,
-                    (pattern, seconds, pattern, pattern, pattern),
+                    (
+                        pattern,
+                        seconds,
+                        pattern,
+                        pattern,
+                        since.isoformat(),
+                        cutoff.isoformat(),
+                        pattern,
+                    ),
                 )
             connection.execute(
                 """
@@ -1070,6 +1130,10 @@ class StorageMaintainer:
         self.runs += 1
 
     def run(self, stop: threading.Event) -> None:
+        # Forecast, accounting and telemetry workers all populate their first
+        # state at startup. Avoid contending with that bounded initialization.
+        if stop.wait(min(60.0, self.config.maintenance_interval_seconds)):
+            return
         while not stop.is_set():
             started = time.monotonic()
             try:

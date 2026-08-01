@@ -172,7 +172,8 @@ class Daemon:
     def _monitor(self, stop: threading.Event) -> None:
         while not stop.is_set():
             persistence_degraded = bool(
-                self.writer.failures or self.measurement_queue.dropped
+                self.writer.consecutive_failures
+                or self.measurement_queue.dropped
             )
             self.state.update_health(
                 "storage",
@@ -180,6 +181,9 @@ class Daemon:
                 database=self.config.database,
                 measurements_written=self.writer.written,
                 write_failures=self.writer.failures,
+                consecutive_write_failures=(
+                    self.writer.consecutive_failures
+                ),
                 queue_depth=self.measurement_queue.queue.qsize(),
                 queue_dropped=self.measurement_queue.dropped,
                 maintenance_runs=self.maintainer.runs,
