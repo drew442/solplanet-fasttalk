@@ -29,6 +29,9 @@ const ranges = {
   "30d": { milliseconds: 30 * 86400e3, bucket: 7200 },
 };
 
+const chartDefinitions = new Map();
+let chartResizeTimer = null;
+
 const powerSeries = [
   ["site.load_power", "Consumption", "#b86242"],
   ["external_pv.active_power", "External PV", "#d9a629"],
@@ -97,6 +100,19 @@ function formatTime(timestamp, includeDate = false) {
     ...(includeDate ? { month: "short", day: "numeric" } : {}),
     hour: "numeric",
     minute: "2-digit",
+  }).format(value);
+}
+
+function formatChartTimestamp(timestamp) {
+  const value = new Date(timestamp);
+  if (Number.isNaN(value.getTime())) return "—";
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
   }).format(value);
 }
 
@@ -612,17 +628,67 @@ function svgNode(tag, attributes = {}) {
   return node;
 }
 
+function nearestChartPoint(points, instant) {
+  let low = 0;
+  let high = points.length - 1;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (points[middle].instant < instant) low = middle + 1;
+    else high = middle;
+  }
+  if (low === 0) return points[0];
+  const before = points[low - 1];
+  const after = points[low];
+  return instant - before.instant <= after.instant - instant ? before : after;
+}
+
+function formatChartTooltipValue(value, options) {
+  if (options.percent) return formatPercent(value);
+  if (options.currency) return formatMoney(value);
+  if (options.price) return formatPrice(value);
+  return formatPower(value);
+}
+
+function chartTooltip(svg) {
+  const wrap = svg.parentElement;
+  let tooltip = wrap.querySelector(".chart-tooltip");
+  if (!tooltip) {
+    tooltip = element("div", "chart-tooltip");
+    tooltip.hidden = true;
+    tooltip.setAttribute("role", "status");
+    tooltip.setAttribute("aria-live", "polite");
+    wrap.append(tooltip);
+  }
+  return tooltip;
+}
+
 function renderChart(id, series, options = {}) {
   const svg = $(id);
+  const priorSelection = Number(svg.dataset.chartSelectedInstant);
+  chartDefinitions.set(id, { series, options });
   svg.replaceChildren();
-  const active = series.filter((item) => item.points.length);
+  svg.removeAttribute("tabindex");
+  svg.onkeydown = null;
+  const tooltip = chartTooltip(svg);
+  tooltip.hidden = true;
+  const active = series.map((item) => ({
+    ...item,
+    points: item.points.map((point) => ({
+      ...point,
+      instant: new Date(point.timestamp).getTime(),
+    })).filter((point) => Number.isFinite(point.instant) && Number.isFinite(point.value))
+      .sort((a, b) => a.instant - b.instant),
+  })).filter((item) => item.points.length);
   const all = active.flatMap((item) => item.points);
-  if (!all.length) return;
+  if (!all.length) {
+    delete svg.dataset.chartSelectedInstant;
+    return;
+  }
 
-  const width = 900;
-  const height = id.toLowerCase().includes("soc") ? 130 : 300;
-  const margin = { left: 54, right: 14, top: 12, bottom: 27 };
-  const xs = all.map((point) => new Date(point.timestamp).getTime()).filter(Number.isFinite);
+  const width = Math.max(320, Math.round(svg.clientWidth || 900));
+  const height = Math.max(300, Math.round(svg.clientHeight || 360));
+  const margin = { left: width < 500 ? 48 : 58, right: 14, top: 14, bottom: 31 };
+  const xs = all.map((point) => point.instant);
   const ys = all.map((point) => point.value).filter(Number.isFinite);
   let minX = Math.min(...xs);
   let maxX = Math.max(...xs);
@@ -668,8 +734,7 @@ function renderChart(id, series, options = {}) {
     svg.append(label);
   }
   for (const item of active) {
-    const ordered = [...item.points].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-    const path = ordered.map((point, index) => `${index ? "L" : "M"}${x(new Date(point.timestamp).getTime()).toFixed(2)},${y(point.value).toFixed(2)}`).join(" ");
+    const path = item.points.map((point, index) => `${index ? "L" : "M"}${x(point.instant).toFixed(2)},${y(point.value).toFixed(2)}`).join(" ");
     svg.append(svgNode("path", {
       d: path,
       class: "chart-path",
@@ -677,6 +742,107 @@ function renderChart(id, series, options = {}) {
       ...(item.dash ? { "stroke-dasharray": item.dash } : {}),
     }));
   }
+
+  const instants = [...new Set(xs)].sort((a, b) => a - b);
+  const instantPoints = instants.map((instant) => ({ instant }));
+  const interaction = svgNode("g", { class: "chart-interaction", visibility: "hidden" });
+  const crosshair = svgNode("line", {
+    x1: margin.left,
+    y1: margin.top,
+    x2: margin.left,
+    y2: height - margin.bottom,
+    class: "chart-crosshair",
+  });
+  interaction.append(crosshair);
+  const markers = active.map((item) => {
+    const marker = svgNode("circle", {
+      r: 4,
+      fill: item.color,
+      class: "chart-marker",
+    });
+    interaction.append(marker);
+    return marker;
+  });
+  const hitArea = svgNode("rect", {
+    x: margin.left,
+    y: margin.top,
+    width: width - margin.left - margin.right,
+    height: height - margin.top - margin.bottom,
+    class: "chart-hit-area",
+  });
+  svg.append(hitArea, interaction);
+  svg.setAttribute("tabindex", "0");
+
+  let selectedIndex = 0;
+  const showTooltip = (instant, clientX = null, clientY = null) => {
+    const selected = nearestChartPoint(
+      instantPoints,
+      instant,
+    ).instant;
+    svg.dataset.chartSelectedInstant = String(selected);
+    selectedIndex = instants.indexOf(selected);
+    const selectedX = x(selected);
+    crosshair.setAttribute("x1", selectedX);
+    crosshair.setAttribute("x2", selectedX);
+    const heading = element("strong", "chart-tooltip__time", formatChartTimestamp(selected));
+    const rows = active.map((item, index) => {
+      const point = nearestChartPoint(item.points, selected);
+      markers[index].setAttribute("cx", x(point.instant));
+      markers[index].setAttribute("cy", y(point.value));
+      const row = element("div", "chart-tooltip__row");
+      const key = element("span", "chart-tooltip__key");
+      const swatch = element("i", "chart-tooltip__swatch");
+      swatch.style.backgroundColor = item.color;
+      key.append(swatch, document.createTextNode(item.label));
+      row.append(key, element("strong", "chart-tooltip__value", formatChartTooltipValue(point.value, options)));
+      if (Math.abs(point.instant - selected) > 1000) {
+        row.append(element("small", "chart-tooltip__sample", `nearest sample ${formatTime(point.timestamp, true)}`));
+      }
+      return row;
+    });
+    tooltip.replaceChildren(heading, ...rows);
+    tooltip.hidden = false;
+    interaction.setAttribute("visibility", "visible");
+
+    const svgRect = svg.getBoundingClientRect();
+    const wrapRect = svg.parentElement.getBoundingClientRect();
+    const pointerX = clientX === null
+      ? ((selectedX / width) * svgRect.width) + svgRect.left - wrapRect.left
+      : clientX - wrapRect.left;
+    const pointerY = clientY === null ? wrapRect.height / 2 : clientY - wrapRect.top;
+    const placeLeft = pointerX > wrapRect.width / 2;
+    tooltip.style.left = `${pointerX + (placeLeft ? -12 : 12)}px`;
+    tooltip.style.transform = placeLeft ? "translateX(-100%)" : "none";
+    const maxTop = Math.max(8, wrapRect.height - tooltip.offsetHeight - 8);
+    tooltip.style.top = `${Math.max(8, Math.min(pointerY - 18, maxTop))}px`;
+  };
+
+  const showFromPointer = (event) => {
+    const rect = svg.getBoundingClientRect();
+    const plotX = Math.max(
+      margin.left,
+      Math.min(width - margin.right, ((event.clientX - rect.left) / rect.width) * width),
+    );
+    const instant = minX + ((plotX - margin.left) / (width - margin.left - margin.right)) * (maxX - minX);
+    showTooltip(instant, event.clientX, event.clientY);
+  };
+  hitArea.addEventListener("pointermove", showFromPointer);
+  hitArea.addEventListener("pointerdown", showFromPointer);
+  hitArea.addEventListener("pointerleave", () => {
+    delete svg.dataset.chartSelectedInstant;
+    tooltip.hidden = true;
+    interaction.setAttribute("visibility", "hidden");
+  });
+  svg.onkeydown = (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    selectedIndex = Math.max(0, Math.min(
+      instants.length - 1,
+      selectedIndex + (event.key === "ArrowRight" ? 1 : -1),
+    ));
+    showTooltip(instants[selectedIndex]);
+  };
+  if (Number.isFinite(priorSelection)) showTooltip(priorSelection);
 }
 
 function renderSpark(id, values) {
@@ -926,6 +1092,14 @@ async function beginDataPolling(pollSeconds = 5) {
 }
 
 function wireInteractions() {
+  window.addEventListener("resize", () => {
+    window.clearTimeout(chartResizeTimer);
+    chartResizeTimer = window.setTimeout(() => {
+      for (const [id, definition] of chartDefinitions) {
+        renderChart(id, definition.series, definition.options);
+      }
+    }, 150);
+  });
   $("authForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     state.token = $("authToken").value.trim();

@@ -185,6 +185,15 @@ class DiagnosticsAssetTests(unittest.TestCase):
         self.assertNotIn("http://", html)
         self.assertNotIn("innerHTML", javascript)
 
+    def test_full_charts_expose_interactive_sample_tooltips(self):
+        package = resources.files("solplanet_fasttalk.webui")
+        css = package.joinpath("app.css").read_text(encoding="utf-8")
+        javascript = package.joinpath("app.js").read_text(encoding="utf-8")
+        self.assertIn("chart-tooltip", css)
+        self.assertIn('addEventListener("pointermove"', javascript)
+        self.assertIn("nearestChartPoint", javascript)
+        self.assertNotIn(".chart-wrap--small {\n  height: 130px", css)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,14 @@ The UI is served by the daemon itself and has no CDN, hosted font, analytics or
 other browser-side internet dependency. It works in current phone and desktop
 browsers.
 
+All full history and forecast graphs use a consistent, readable height. Hover
+the mouse anywhere over a graph, or touch it on a phone, to snap a crosshair to
+the nearest recorded or forecast sample. The readout shows that sample's local
+timestamp and the actual value for every metric on the graph. If series have
+different sampling intervals, the readout identifies a metric whose nearest
+sample has a different timestamp. The left and right arrow keys move the
+crosshair between samples when a graph has keyboard focus.
+
 ## Information shown
 
 ### Present
