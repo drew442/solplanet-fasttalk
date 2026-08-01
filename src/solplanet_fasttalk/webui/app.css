@@ -770,6 +770,10 @@ main {
 .legend-asw { background: var(--green); }
 .legend-grid { background: var(--grid); }
 .legend-plan { background: var(--plan); }
+.legend-provider {
+  border-top: 2px dashed #bd9d49;
+  background: transparent;
+}
 .legend-baseline {
   border-top: 2px dashed #9ba39e;
   background: transparent;

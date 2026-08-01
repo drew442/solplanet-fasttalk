@@ -537,6 +537,13 @@ class HistoryReader:
                     {
                         "forecast_at": forecast_at,
                         "issued_at": issued_at,
+                        "horizon_hours": round(
+                            (
+                                target - dt_from_iso(issued_at)
+                            ).total_seconds()
+                            / 3600,
+                            4,
+                        ),
                         "forecast_power_w": power_w,
                         "actual_power_w": actual,
                         "error_w": actual - power_w,
@@ -583,6 +590,83 @@ class HistoryReader:
             }
             for row in rows
         ]
+
+    def forecast_samples(
+        self,
+        *,
+        provider: str,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 50000,
+    ) -> list[dict[str, Any]]:
+        """Return issued forecasts matched to actuals, preserving lead time."""
+
+        clauses = ["provider = ?"]
+        values: list[Any] = [provider]
+        if since:
+            clauses.append("forecast_at >= ?")
+            values.append(since)
+        if until:
+            clauses.append("forecast_at <= ?")
+            values.append(until)
+        values.append(max(1, min(limit, 100000)))
+        with sqlite3.connect(self.path) as connection:
+            forecasts = connection.execute(
+                f"""
+                SELECT issued_at, forecast_at, power_w
+                FROM forecast_points
+                WHERE {' AND '.join(clauses)}
+                ORDER BY forecast_at DESC, issued_at DESC
+                LIMIT ?
+                """,
+                values,
+            ).fetchall()
+            if not forecasts:
+                return []
+            earliest = min(row[1] for row in forecasts)
+            latest = max(row[1] for row in forecasts)
+            actuals = connection.execute(
+                """
+                SELECT
+                    CAST(strftime('%s', observed_at) AS INTEGER) / 60 AS bucket,
+                    AVG(value_num)
+                FROM measurements
+                WHERE name = 'external_pv.active_power'
+                  AND value_num IS NOT NULL
+                  AND julianday(observed_at) >= julianday(?, '-15 minutes')
+                  AND julianday(observed_at) <= julianday(?, '+15 minutes')
+                GROUP BY bucket
+                """,
+                (earliest, latest),
+            ).fetchall()
+        actual_by_minute = {int(row[0]): float(row[1]) for row in actuals}
+        result = []
+        for issued_at, forecast_at, power_w in forecasts:
+            target = dt_from_iso(forecast_at)
+            minute = int(target.timestamp()) // 60
+            candidates = [
+                (abs(offset), actual_by_minute.get(minute + offset))
+                for offset in range(-15, 16)
+                if minute + offset in actual_by_minute
+            ]
+            if not candidates:
+                continue
+            _, actual = min(candidates, key=lambda item: item[0])
+            result.append(
+                {
+                    "issued_at": issued_at,
+                    "forecast_at": forecast_at,
+                    "horizon_hours": round(
+                        (target - dt_from_iso(issued_at)).total_seconds()
+                        / 3600,
+                        4,
+                    ),
+                    "forecast_power_w": float(power_w),
+                    "actual_power_w": float(actual),
+                    "error_w": float(actual) - float(power_w),
+                }
+            )
+        return result
 
     def latest_financial_period(self) -> str | None:
         with sqlite3.connect(self.path) as connection:

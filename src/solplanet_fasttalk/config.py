@@ -91,6 +91,19 @@ class ForecastSolarConfig:
 
 
 @dataclass(frozen=True)
+class WeatherConfig:
+    enabled: bool = False
+    provider: str = "open-meteo"
+    location_file: str = ""
+    cache_file: str = ""
+    refresh_interval_seconds: int = 1800
+    retry_interval_seconds: int = 300
+    request_timeout_seconds: float = 15.0
+    max_cache_age_seconds: int = 10800
+    forecast_days: int = 10
+
+
+@dataclass(frozen=True)
 class OptimisationConfig:
     enabled: bool = False
     interval_seconds: int = 300
@@ -118,6 +131,7 @@ class DaemonConfig:
     solis: SolisConfig = SolisConfig()
     tariff: TariffConfig = TariffConfig()
     forecast_solar: ForecastSolarConfig = ForecastSolarConfig()
+    weather: WeatherConfig = WeatherConfig()
     optimisation: OptimisationConfig = OptimisationConfig()
 
 
@@ -158,6 +172,7 @@ def load_config(path: str | os.PathLike[str]) -> DaemonConfig:
         "solis",
         "tariff",
         "forecast_solar",
+        "weather",
         "optimisation",
     }
     if unknown_root:
@@ -189,6 +204,7 @@ def load_config(path: str | os.PathLike[str]) -> DaemonConfig:
         solis=_construct(SolisConfig, _table(data, "solis")),
         tariff=_construct(TariffConfig, _table(data, "tariff")),
         forecast_solar=_construct(ForecastSolarConfig, forecast_values),
+        weather=_construct(WeatherConfig, _table(data, "weather")),
         optimisation=_construct(
             OptimisationConfig, _table(data, "optimisation")
         ),
@@ -310,6 +326,30 @@ def validate_config(config: DaemonConfig) -> None:
             raise ConfigError("forecast plane azimuth must be between -180 and 180")
         if plane.peak_power_kw <= 0:
             raise ConfigError("forecast plane peak_power_kw must be positive")
+    weather = config.weather
+    if weather.provider != "open-meteo":
+        raise ConfigError("unsupported weather.provider")
+    if weather.enabled:
+        for name, value in (
+            ("location_file", weather.location_file),
+            ("cache_file", weather.cache_file),
+        ):
+            if not value:
+                raise ConfigError(f"weather.{name} is required when enabled")
+        if not forecast.enabled or not forecast.planes:
+            raise ConfigError(
+                "weather-enhanced PV forecasting requires forecast_solar"
+            )
+    if not 1 <= weather.forecast_days <= 10:
+        raise ConfigError("weather.forecast_days must be between 1 and 10")
+    for name, value in (
+        ("refresh_interval_seconds", weather.refresh_interval_seconds),
+        ("retry_interval_seconds", weather.retry_interval_seconds),
+        ("request_timeout_seconds", weather.request_timeout_seconds),
+        ("max_cache_age_seconds", weather.max_cache_age_seconds),
+    ):
+        if value <= 0:
+            raise ConfigError(f"weather.{name} must be greater than zero")
     optimisation = config.optimisation
     if optimisation.enabled and not config.tariff.enabled:
         raise ConfigError("optimisation requires the tariff model")

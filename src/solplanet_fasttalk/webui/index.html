@@ -99,7 +99,7 @@
       <article class="metric-card metric-card--solar">
         <div class="metric-head"><span>PV production</span><span class="metric-tag">AC</span></div>
         <strong id="solarPower" class="metric-value">—</strong>
-        <span id="solarSplit" class="metric-sub">External + Solplanet</span>
+        <span id="solarSplit" class="metric-sub">External + Solplanet PV</span>
         <div class="sparkline" id="solarSpark" aria-hidden="true"></div>
       </article>
       <article class="metric-card metric-card--battery">
@@ -268,7 +268,8 @@
 
       <div class="legend">
         <span><i class="legend-load"></i>Forecast consumption</span>
-        <span><i class="legend-solar"></i>Forecast PV</span>
+        <span><i class="legend-solar"></i>Corrected PV</span>
+        <span><i class="legend-provider"></i>Provider PV</span>
         <span><i class="legend-plan"></i>Expected grid</span>
         <span><i class="legend-baseline"></i>Grid if native command continues</span>
       </div>
@@ -290,6 +291,22 @@
       </div>
       <div class="chart-wrap chart-wrap--small">
         <svg id="tariffFutureChart" class="line-chart" role="img" aria-label="Future import and export tariff prices"></svg>
+      </div>
+
+      <div class="schedule-head">
+        <div><p class="eyebrow">WEATHER</p><h3>Cloud and solar outlook</h3></div>
+        <span id="weatherStatus" class="quiet">Unavailable</span>
+      </div>
+      <div class="accuracy-numbers">
+        <div><span>Cloud cover</span><strong id="weatherCloud">—</strong></div>
+        <div><span>Temperature</span><strong id="weatherTemperature">—</strong></div>
+        <div><span>PV potential</span><strong id="weatherPvPotential">—</strong></div>
+      </div>
+      <div class="chart-wrap chart-wrap--small">
+        <svg id="weatherChart" class="line-chart" role="img" aria-label="Forecast cloud cover and precipitation probability"></svg>
+      </div>
+      <div class="chart-wrap chart-wrap--small">
+        <svg id="weatherRadiationChart" class="line-chart" role="img" aria-label="Forecast solar radiation and theoretical PV potential"></svg>
       </div>
 
       <div class="schedule-head">
@@ -351,6 +368,7 @@
           <div><span>Error</span><strong id="forecastError">—</strong></div>
         </div>
         <p id="forecastScope" class="panel-intro">Combined east/west PV forecast.</p>
+        <p id="forecastCorrection" class="panel-intro">Correction model is waiting for history.</p>
       </article>
 
       <article class="panel tariff-card">

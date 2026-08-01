@@ -10,10 +10,12 @@ The terminal-8 Eastron remains authoritative for grid and aggregate external-PV
 AC accounting. Direct Solis values use the `solis.*` namespace and diagnostic
 authority; a sustained difference raises an event without replacing Eastron.
 
-Fresh grid, external-PV and ASW measurements derive:
+Fresh grid, external-PV, ASW AC and dedicated ASW PV measurements derive:
 
 - `site.load_power`;
 - `site.generation_power`;
+- `site.pv_generation_power`;
+- `site.local_supply_power`;
 - `site.self_consumption_power`;
 - `site.self_consumption_ratio`; and
 - `site.self_sufficiency_ratio`.
@@ -98,6 +100,15 @@ is compared with the Eastron's authoritative aggregate external-PV AC power;
 the present CT arrangement cannot provide separate east-versus-west actual
 production. Forecast points are persisted for historical comparison.
 
+The base forecast now passes through astronomical night gating and robust
+long/short-term correction against the authoritative Eastron actual. An
+Open-Meteo integration supplies cloud, precipitation, temperature and tilted
+irradiance context without exposing the private runtime location. Every base
+and corrected issuance is retained and scored by lead-time band. Shadow plans
+may continue learning, but the forecast cannot report control readiness until
+the independent 28-day accuracy gate passes. See
+[Data quality and forecasting](data-quality-and-forecasting.md).
+
 The worker enforces a configurable refresh interval and retry backoff. Its
 atomic local cache remains visibly marked as cached and aged. A provider or
 internet failure degrades only this integration and cannot stop the serial
@@ -172,6 +183,7 @@ GET /v1/tariffs/current
 GET /v1/tariffs/forecast
 GET /v1/forecasts/pv
 GET /v1/forecasts/pv?since=...&until=...
+GET /v1/weather
 GET /v1/plans/current
 GET /v1/plans/history
 GET /v1/financials/history

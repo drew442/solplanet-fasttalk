@@ -2,6 +2,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import struct
 import tempfile
 import threading
 import time
@@ -25,6 +26,7 @@ from solplanet_fasttalk.eastron import EastronDecoder
 from solplanet_fasttalk.model import Measurement, MeasurementQueue, PlantState
 from solplanet_fasttalk.modbus import (
     RTUStreamDecoder,
+    Transaction,
     TransactionMatcher,
     append_crc,
     build_read_request,
@@ -122,6 +124,25 @@ class MilestoneModbusTests(unittest.TestCase):
         self.assertNotIn("os.write(", inspect.getsource(eastron_module))
         self.assertNotIn("os.write(", inspect.getsource(readonly_module))
 
+    def test_external_pv_aggregate_clamps_reverse_standby_power(self):
+        decoder = EastronDecoder(
+            EastronConfig(enabled=False, grid_slave=1, external_pv_slave=2)
+        )
+        transaction = Transaction(
+            slave=2,
+            function=0x04,
+            pdu_start=12,
+            count=6,
+            request=b"",
+            response=b"",
+            data=struct.pack(">fff", -8.0, -9.0, -7.0),
+        )
+        decoded = {item.name: item for item in decoder.decode(transaction)}
+        aggregate = decoded["external_pv.active_power"]
+        self.assertEqual(aggregate.value, 0)
+        self.assertEqual(aggregate.metadata["unclamped_value_w"], -24)
+        self.assertEqual(decoded["external_pv.phase.l1.active_power"].value, -8)
+
 
 class PlantModelTests(unittest.TestCase):
     def test_derives_site_load_from_fresh_authoritative_inputs(self):
@@ -134,6 +155,7 @@ class PlantModelTests(unittest.TestCase):
                 measurement("grid.active_power", -1000, now),
                 measurement("external_pv.active_power", 2500, now),
                 measurement("asw.active_power", -500, now),
+                measurement("asw.pv.active_power", 0, now),
             ]
         )
         load = state.current()["site.load_power"]
@@ -149,6 +171,7 @@ class PlantModelTests(unittest.TestCase):
                 measurement("grid.active_power", 100, now - 20, 2),
                 measurement("external_pv.active_power", 200, now, 10),
                 measurement("asw.active_power", 300, now, 10),
+                measurement("asw.pv.active_power", 0, now, 10),
             ]
         )
         self.assertNotIn("site.load_power", state.current())

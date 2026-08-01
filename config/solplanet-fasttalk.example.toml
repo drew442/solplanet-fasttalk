@@ -86,6 +86,20 @@ declination = 25
 azimuth = 90
 peak_power_kw = 6.2
 
+[weather]
+# Open-Meteo's best-match forecast is used as an independent weather context.
+# The coordinates are read from this target-only file and are never returned,
+# logged, cached, or stored in SQLite. Do not put coordinates in this TOML.
+enabled = true
+provider = "open-meteo"
+location_file = "/config/.storage/core.config"
+cache_file = "/var/lib/solplanet-fasttalk/open-meteo-cache.json"
+refresh_interval_seconds = 1800
+retry_interval_seconds = 300
+request_timeout_seconds = 15
+max_cache_age_seconds = 10800
+forecast_days = 10
+
 [optimisation]
 # Phase 6 is recommendation/replay only. There is no call path from this planner
 # to a serial write transport.

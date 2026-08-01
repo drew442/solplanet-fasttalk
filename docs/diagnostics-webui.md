@@ -31,6 +31,7 @@ browsers.
 - actual import cost, export revenue and net cost history;
 - today and month-to-date energy/cost totals;
 - historical PV forecast-versus-actual graphs;
+- separate provider and corrected PV forecast traces;
 - persisted optimiser decisions and their modelled improvements; and
 - recent daemon events.
 
@@ -41,6 +42,9 @@ count, minimum and maximum for diagnostics.
 ### Future
 
 - forecast load and combined east/west PV;
+- provider PV, corrected PV and the current long/short correction factors;
+- cloud cover, precipitation probability, temperature and independent
+  tilted-irradiance PV potential from Open-Meteo;
 - expected grid power with the shadow schedule;
 - grid and SOC baselines produced by continuing the inverter's currently
   stored native operating mode and power command;
@@ -55,6 +59,11 @@ The decision pipeline exposes the optimiser's observations, forecast method,
 freshness, BMS-derived power limits, configured SOC/site constraints, tariff
 period and forecast-versus-authoritative-actual comparison. A missing or stale
 required input is shown as a no-action reason rather than hidden.
+
+The forecast panel also shows whether the independent accuracy gate has passed.
+Shadow recommendations remain available while the model learns, but this state
+is visibly distinct from control readiness. Details are in
+[Data quality and forecasting](data-quality-and-forecasting.md).
 
 The baseline is explicitly an estimate, not a claim about hidden inverter
 logic. It assumes the fresh native charge/hold/discharge command persists until
@@ -189,6 +198,7 @@ committed to the repository.
 
 ```text
 GET /v1/diagnostics
+GET /v1/weather
 GET /v1/measurements/history?name=...&since=...&until=...&bucket_seconds=...
 GET /v1/tariffs/forecast?hours=...&step_minutes=...
 GET /v1/financials/history?since=...&until=...&bucket_seconds=...

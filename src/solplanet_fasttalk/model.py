@@ -46,6 +46,7 @@ class PlantState:
         "grid.active_power",
         "external_pv.active_power",
         "asw.active_power",
+        "asw.pv.active_power",
     )
 
     def __init__(self) -> None:
@@ -113,7 +114,7 @@ class PlantState:
         ):
             self._clear_derived_locked()
             return []
-        grid, external, asw = typed
+        grid, external, asw, asw_pv = typed
         expiry = min(
             item.observed_monotonic + item.max_age_seconds for item in typed
         )
@@ -123,30 +124,48 @@ class PlantState:
             + float(external.value)
             + float(asw.value)
         )
+        # ASW AC power includes battery charge/discharge. It is not PV power.
+        # The initial plant has no PV connected to the ASW, and the dedicated
+        # ASW PV register correctly reports zero. Keep these concepts separate
+        # so battery discharge can never appear as night-time solar production.
         generation = max(0.0, float(external.value)) + max(
-            0.0, float(asw.value)
+            0.0, float(asw_pv.value)
         )
         export = max(0.0, -float(grid.value))
         load = max(0.0, value)
-        self_consumed = max(0.0, min(generation, generation - export, load))
+        grid_import = max(0.0, float(grid.value))
+        self_consumed = max(0.0, min(generation, generation - export))
+        local_supply = max(0.0, min(load, load - grid_import))
         specifications = (
             (
                 "site.load_power",
-                round(value, 3),
+                round(load, 3),
                 "W",
-                "grid.active_power + external_pv.active_power + asw.active_power",
+                "max(0, grid.active_power + external_pv.active_power + asw.active_power)",
             ),
             (
                 "site.generation_power",
                 round(generation, 3),
                 "W",
-                "max(0, external_pv.active_power) + max(0, asw.active_power)",
+                "max(0, external_pv.active_power) + max(0, asw.pv.active_power)",
+            ),
+            (
+                "site.pv_generation_power",
+                round(generation, 3),
+                "W",
+                "max(0, external_pv.active_power) + max(0, asw.pv.active_power)",
+            ),
+            (
+                "site.local_supply_power",
+                round(local_supply, 3),
+                "W",
+                "max(0, min(site.load_power, site.load_power - grid import))",
             ),
             (
                 "site.self_consumption_power",
                 round(self_consumed, 3),
                 "W",
-                "min(site.generation_power - grid export, site.load_power)",
+                "max(0, min(site.generation_power, site.generation_power - grid export))",
             ),
             (
                 "site.self_consumption_ratio",
@@ -156,9 +175,9 @@ class PlantState:
             ),
             (
                 "site.self_sufficiency_ratio",
-                round(self_consumed / load, 6) if load else None,
+                round(local_supply / load, 6) if load else None,
                 "ratio",
-                "site.self_consumption_power / site.load_power",
+                "site.local_supply_power / site.load_power",
             ),
         )
         derived = [
@@ -184,6 +203,8 @@ class PlantState:
         for name in (
             "site.load_power",
             "site.generation_power",
+            "site.pv_generation_power",
+            "site.local_supply_power",
             "site.self_consumption_power",
             "site.self_consumption_ratio",
             "site.self_sufficiency_ratio",

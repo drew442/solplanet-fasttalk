@@ -188,17 +188,28 @@ class EastronDecoder:
             ):
                 phase_powers.append(value)
         if len(phase_powers) == 3:
+            raw_total = round(sum(phase_powers), 6)
+            # Slave 2 is installed around a generation feeder. Small negative
+            # readings around dusk are inverter standby consumption and CT /
+            # meter noise, not negative PV generation. Preserve the signed
+            # per-phase and meter-total registers for diagnostics while making
+            # the authoritative plant-facing PV aggregate physically bounded.
+            aggregate = max(0.0, raw_total) if prefix == "external_pv" else raw_total
             result.append(
                 self._measurement(
                     f"{prefix}.active_power",
-                    round(sum(phase_powers), 6),
+                    aggregate,
                     "W",
                     source,
                     timestamp,
                     now_mono,
                     max_age,
                     transaction,
-                    {"method": "sum_of_phases"},
+                    {
+                        "method": "sum_of_phases",
+                        "negative_generation_clamped": prefix == "external_pv",
+                        "unclamped_value_w": raw_total,
+                    },
                 )
             )
         if transaction.pdu_start == 342:

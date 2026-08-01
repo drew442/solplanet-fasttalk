@@ -13,6 +13,7 @@ const state = {
   historical: {
     financials: [],
     forecastComparison: [],
+    forecastBaseComparison: [],
     plans: [],
     tariff: [],
   },
@@ -173,8 +174,9 @@ function renderCurrent() {
   const grid = number(measurement("grid.active_power")?.value);
   const load = number(measurement("site.load_power")?.value);
   const external = number(measurement("external_pv.active_power")?.value);
+  const aswPv = number(measurement("asw.pv.active_power")?.value);
   const asw = number(measurement("asw.active_power")?.value);
-  const solar = [external, asw]
+  const solar = [external, aswPv]
     .filter((value) => value !== null)
     .reduce((sum, value) => sum + Math.max(0, value), 0);
   const battery = number(measurement("battery.power")?.value);
@@ -193,7 +195,7 @@ function renderCurrent() {
   setText("loadPower", formatPower(load));
   setText("selfSufficiency", `Self-sufficiency ${formatPercent(selfSufficiency, true)}`);
   setText("solarPower", solar ? formatPower(solar) : external === null && asw === null ? "—" : "0 W");
-  setText("solarSplit", `${formatPower(external)} external · ${formatPower(asw)} Solplanet`);
+  setText("solarSplit", `${formatPower(external)} external · ${formatPower(aswPv)} Solplanet PV`);
   setText("batterySoc", formatPercent(soc));
   setText(
     "batteryState",
@@ -209,7 +211,7 @@ function renderCurrent() {
   setText("flowBattery", formatPower(battery === null ? null : Math.abs(battery)));
   setText("selfConsumed", formatPower(selfConsumed));
 
-  const required = ["grid.active_power", "external_pv.active_power", "asw.active_power"];
+  const required = ["grid.active_power", "external_pv.active_power", "asw.pv.active_power"];
   const qualities = required.map((name) => measurement(name)?.quality || "missing");
   const quality = qualities.every((value) => value === "good")
     ? "Authoritative"
@@ -378,6 +380,13 @@ function renderForecastAndTariff() {
   setText("actualNow", formatPower(comparison?.actual_power_w));
   setText("forecastError", formatPower(comparison?.error_w, true));
   setText("forecastScope", forecast.comparison_scope || "Combined configured PV planes.");
+  const correction = forecast.correction || {};
+  setText(
+    "forecastCorrection",
+    correction.method
+      ? `${title(correction.quality)} · long ${Number(correction.long_term_factor || 1).toFixed(3)} (${correction.long_term_days || 0}/${correction.long_term_required_days || 14} days) · short residual ${Number(correction.short_term_factor || 1).toFixed(3)} (${correction.short_term_samples || 0} samples) · weather ${correction.weather_available ? "active" : "unavailable"} · control gate ${correction.control_ready ? "passed" : "not passed"}.`
+      : "Correction model is waiting for forecast history.",
+  );
   const error = Math.abs(number(comparison?.error_w) || 0);
   setChip(
     "forecastQuality",
@@ -458,6 +467,7 @@ function renderSchedule() {
   const futureSeries = [
     ["forecast_load_w", "Consumption", "#b86242"],
     ["forecast_pv_w", "PV", "#d9a629"],
+    ["forecast_base_pv_w", "Provider PV", "#bd9d49", "4 4"],
     ["expected_grid_power_w", "Expected grid", "#76557f"],
     ["baseline_grid_power_w", "Baseline", "#9ba39e", "5 5"],
   ].map(([key, label, color, dash]) => ({
@@ -512,6 +522,43 @@ function renderSchedule() {
       })).filter((item) => item.value !== null),
     },
   ], { price: true, includeZero: true });
+}
+
+function renderWeather() {
+  const weather = state.snapshot?.weather || {};
+  const points = weather.points || [];
+  const now = Date.now();
+  const future = points.filter((item) => new Date(item.timestamp).getTime() >= now - 3600e3);
+  const current = future[0] || null;
+  setText("weatherStatus", weather.status ? `${title(weather.status)} · ${formatAge(weather.age_seconds)} old` : "Unavailable");
+  setText("weatherCloud", current ? formatPercent(current.cloud_cover_percent) : "—");
+  setText("weatherTemperature", current ? `${Number(current.temperature_c).toFixed(1)} °C` : "—");
+  setText("weatherPvPotential", current ? formatPower(current.pv_potential_w) : "—");
+  renderChart("weatherChart", [
+    {
+      label: "Cloud cover",
+      color: "#587c95",
+      points: future.map((item) => ({ timestamp: item.timestamp, value: number(item.cloud_cover_percent) })).filter((item) => item.value !== null),
+    },
+    {
+      label: "Precipitation probability",
+      color: "#76557f",
+      points: future.map((item) => ({ timestamp: item.timestamp, value: number(item.precipitation_probability_percent) })).filter((item) => item.value !== null),
+    },
+  ], { percent: true });
+  const forecast = state.snapshot?.forecast?.points || [];
+  renderChart("weatherRadiationChart", [
+    {
+      label: "Weather PV potential",
+      color: "#587c95",
+      points: future.map((item) => ({ timestamp: item.timestamp, value: number(item.pv_potential_w) })).filter((item) => item.value !== null),
+    },
+    {
+      label: "Corrected PV forecast",
+      color: "#d9a629",
+      points: forecast.map((item) => ({ timestamp: item.timestamp, value: number(item.power_w) })).filter((item) => item.value !== null),
+    },
+  ], { includeZero: true });
 }
 
 function svgNode(tag, attributes = {}) {
@@ -641,6 +688,7 @@ async function loadHistory() {
   ]);
   state.historical.financials = financialPayload.financials || [];
   state.historical.forecastComparison = forecastPayload.historical_comparison || [];
+  state.historical.forecastBaseComparison = forecastPayload.historical_base_comparison || [];
   state.historical.plans = planPayload.plans || [];
   state.historical.tariff = tariffPayload.points || [];
   renderChart("historyChart", results.slice(0, 4), { includeZero: true });
@@ -693,9 +741,11 @@ function renderHistoricalInsights() {
   );
 
   const comparison = state.historical.forecastComparison || [];
+  const baseComparison = state.historical.forecastBaseComparison || [];
+  const actualComparison = comparison.length ? comparison : baseComparison;
   renderChart("accuracyHistoryChart", [
     {
-      label: "Forecast PV",
+      label: "Corrected PV",
       color: "#d9a629",
       points: comparison.map((item) => ({
         timestamp: item.forecast_at,
@@ -703,15 +753,24 @@ function renderHistoricalInsights() {
       })).filter((item) => item.value !== null),
     },
     {
+      label: "Provider PV",
+      color: "#bd9d49",
+      dash: "4 4",
+      points: baseComparison.map((item) => ({
+        timestamp: item.forecast_at,
+        value: number(item.forecast_power_w),
+      })).filter((item) => item.value !== null),
+    },
+    {
       label: "Actual PV",
       color: "#3e8b68",
-      points: comparison.map((item) => ({
+      points: actualComparison.map((item) => ({
         timestamp: item.forecast_at,
         value: number(item.actual_power_w),
       })).filter((item) => item.value !== null),
     },
   ], { includeZero: true });
-  const errors = comparison.map((item) => Math.abs(number(item.error_w))).filter(Number.isFinite);
+  const errors = actualComparison.map((item) => Math.abs(number(item.error_w))).filter(Number.isFinite);
   setText(
     "accuracyHistorySummary",
     errors.length
@@ -763,6 +822,7 @@ function renderAll() {
   renderHealth();
   renderWorkings();
   renderForecastAndTariff();
+  renderWeather();
   renderDevicesAndEvents();
   renderSchedule();
   const stamp = state.snapshot?.plant?.timestamp || state.snapshot?.health?.timestamp;

@@ -25,6 +25,7 @@ from .storage import (
     initialize_database,
 )
 from .tariff import ZeroHeroTariff
+from .weather import OpenMeteoWorker, WeatherStore
 
 
 LOG = logging.getLogger(__name__)
@@ -50,6 +51,9 @@ class Daemon:
             if config.forecast_solar.enabled
             else None
         )
+        self.weather = (
+            WeatherStore(config.weather) if config.weather.enabled else None
+        )
         self.plans = PlanStore() if config.optimisation.enabled else None
         self.api = API(
             config,
@@ -57,6 +61,7 @@ class Daemon:
             self.history,
             tariff=self.tariff,
             forecast=self.forecast,
+            weather=self.weather,
             plans=self.plans,
             plugins=self.plugins,
         )
@@ -98,6 +103,17 @@ class Daemon:
             self._thread("solis", worker.run)
         else:
             self.state.update_health("solis", status="disabled")
+        if self.weather is not None:
+            worker = OpenMeteoWorker(
+                self.config.weather,
+                self.config.forecast_solar.planes,
+                self.weather,
+                self.state,
+                self.history,
+            )
+            self._thread("weather", worker.run)
+        else:
+            self.state.update_health("weather", status="disabled")
         if self.forecast is not None:
             worker = ForecastSolarWorker(
                 self.config.forecast_solar,
@@ -105,6 +121,7 @@ class Daemon:
                 self.forecast,
                 self.state,
                 self.history,
+                self.weather,
             )
             self._thread("forecast-solar", worker.run)
         else:

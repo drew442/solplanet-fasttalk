@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 import sqlite3
+import statistics
 import threading
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -23,6 +25,7 @@ class ForecastSlot:
     timestamp: dt.datetime
     load_w: float
     pv_w: float
+    base_pv_w: float | None = None
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,7 @@ class Recommendation:
     action: str
     forecast_load_w: float
     forecast_pv_w: float
+    forecast_base_pv_w: float
     baseline_grid_power_w: float
     baseline_battery_power_w: float
     baseline_expected_soc_percent: float
@@ -353,6 +357,10 @@ def simulate_plan(
                 action,
                 round(slot.load_w, 3),
                 round(slot.pv_w, 3),
+                round(
+                    slot.pv_w if slot.base_pv_w is None else slot.base_pv_w,
+                    3,
+                ),
                 round(baseline_grid, 3),
                 round(baseline_battery_power, 3),
                 round(baseline_stored_wh / capacity_wh * 100.0, 3),
@@ -537,27 +545,44 @@ class OptimisationWorker:
         cutoff = now + dt.timedelta(hours=self.config.horizon_hours)
         load_w = float(required["site.load_power"]["value"])
         load_profile = self._load_profile(now)
+        load_correction, load_correction_samples = self._load_correction(
+            now,
+            load_profile,
+            load_w,
+        )
         step_seconds = self.config.step_minutes * 60
         pv_buckets: dict[int, list[float]] = {}
+        base_pv_buckets: dict[int, list[float]] = {}
         for point in forecast["points"]:
             timestamp = dt.datetime.fromisoformat(point["timestamp"])
             if now <= timestamp <= cutoff:
                 bucket = int(timestamp.timestamp()) // step_seconds
                 pv_buckets.setdefault(bucket, []).append(float(point["power_w"]))
+                base_pv_buckets.setdefault(bucket, []).append(
+                    float(point.get("base_power_w", point["power_w"]))
+                )
         slots = []
         for bucket, samples in sorted(pv_buckets.items()):
             timestamp = dt.datetime.fromtimestamp(
                 bucket * step_seconds, tz=dt.timezone.utc
             )
             local = timestamp.astimezone(self.tariff.timezone)
-            forecast_load = load_profile.get(
-                (local.weekday(), local.hour), load_w
+            long_load = load_profile.get((local.weekday(), local.hour), load_w)
+            horizon_hours = max(
+                0.0,
+                (timestamp - now).total_seconds() / 3600,
             )
+            correction = 1 + (load_correction - 1) * math.exp(
+                -horizon_hours / 4
+            )
+            forecast_load = max(0.0, long_load * correction)
             slots.append(
                 ForecastSlot(
                     timestamp,
                     forecast_load,
                     sum(samples) / len(samples),
+                    sum(base_pv_buckets[bucket])
+                    / len(base_pv_buckets[bucket]),
                 )
             )
         if not slots:
@@ -600,11 +625,30 @@ class OptimisationWorker:
             "inputs": inputs,
             "load_forecast": {
                 "method": (
-                    "historical weekday/hour mean with current-load fallback"
+                    "historical weekday/hour median with current-load fallback"
                     if load_profile
                     else "current-load persistence"
                 ),
                 "historical_buckets": len(load_profile),
+                "long_term_statistic": "median of 15-minute observations",
+                "short_term_factor": round(load_correction, 5),
+                "short_term_samples": load_correction_samples,
+                "short_term_decay_hours": 4,
+            },
+            "pv_forecast_quality": {
+                "control_ready": bool(
+                    forecast.get("correction", {}).get("control_ready", False)
+                ),
+                "learning_state": forecast.get("correction", {}).get(
+                    "quality", "unknown"
+                ),
+                "validation": forecast.get("correction", {}).get(
+                    "validation", {}
+                ),
+                "note": (
+                    "shadow planning continues while accuracy learns; this "
+                    "quality gate cannot enable hardware writes"
+                ),
             },
             **result,
             "control_commands_sent": 0,
@@ -679,15 +723,18 @@ class OptimisationWorker:
         if self.history is None:
             return {}
         since = (now - dt.timedelta(days=35)).isoformat()
-        samples = self.history.measurements(
+        samples = self.history.series(
             "site.load_power",
             since=since,
-            limit=1000,
-            resolution="hourly",
+            bucket_seconds=900,
+            limit=10000,
         )
         buckets: dict[tuple[int, int], list[float]] = {}
         for sample in samples:
-            if not isinstance(sample["value"], (int, float)):
+            if (
+                not isinstance(sample["value"], (int, float))
+                or not 0 <= float(sample["value"]) <= 30000
+            ):
                 continue
             timestamp = dt.datetime.fromisoformat(sample["observed_at"])
             if timestamp.tzinfo is None:
@@ -697,5 +744,35 @@ class OptimisationWorker:
                 max(0.0, float(sample["value"]))
             )
         return {
-            key: sum(values) / len(values) for key, values in buckets.items()
+            key: statistics.median(values)
+            for key, values in buckets.items()
+            if len(values) >= 3
         }
+
+    def _load_correction(
+        self,
+        now: dt.datetime,
+        profile: dict[tuple[int, int], float],
+        current_load_w: float,
+    ) -> tuple[float, int]:
+        if self.history is None:
+            return 1.0, 0
+        samples = self.history.series(
+            "site.load_power",
+            since=(now - dt.timedelta(minutes=30)).isoformat(),
+            until=now.isoformat(),
+            bucket_seconds=300,
+            limit=12,
+        )
+        values = [
+            float(sample["value"])
+            for sample in samples
+            if isinstance(sample["value"], (int, float))
+            and 0 <= float(sample["value"]) <= 30000
+        ]
+        local = now.astimezone(self.tariff.timezone)
+        baseline = profile.get((local.weekday(), local.hour), current_load_w)
+        if len(values) < 3 or baseline < 100:
+            return 1.0, len(values)
+        factor = statistics.median(values) / baseline
+        return max(0.5, min(1.5, factor)), len(values)

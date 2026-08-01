@@ -16,12 +16,15 @@ from solplanet_fasttalk.config import (
     OptimisationConfig,
     StorageConfig,
     TariffConfig,
+    WeatherConfig,
     load_config,
 )
 from solplanet_fasttalk.forecast import (
     ForecastSolarWorker,
     ForecastStore,
+    ForecastCorrector,
     _endpoint,
+    solar_elevation_degrees,
 )
 from solplanet_fasttalk.model import Measurement, PlantState
 from solplanet_fasttalk.optimisation import (
@@ -39,6 +42,7 @@ from solplanet_fasttalk.storage import (
     initialize_database,
 )
 from solplanet_fasttalk.tariff import PLAN_ID, ZeroHeroTariff
+from solplanet_fasttalk.weather import OpenMeteoWorker, WeatherStore
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -66,6 +70,7 @@ class Phase3Tests(unittest.TestCase):
                 measurement("grid.active_power", -500),
                 measurement("external_pv.active_power", 3000),
                 measurement("asw.active_power", 0),
+                measurement("asw.pv.active_power", 0),
             ]
         )
         current = state.current()
@@ -81,6 +86,34 @@ class Phase3Tests(unittest.TestCase):
             "grid.active_power",
             current["site.self_consumption_power"]["metadata"]["inputs"],
         )
+
+    def test_battery_discharge_is_not_reported_as_pv_generation(self):
+        state = PlantState()
+        state.publish_many(
+            [
+                measurement("grid.active_power", -500),
+                measurement("external_pv.active_power", 0),
+                measurement("asw.active_power", 1500),
+                measurement("asw.pv.active_power", 0),
+            ]
+        )
+        current = state.current()
+        self.assertEqual(current["site.load_power"]["value"], 1000)
+        self.assertEqual(current["site.generation_power"]["value"], 0)
+        self.assertEqual(current["site.pv_generation_power"]["value"], 0)
+        self.assertEqual(current["site.self_sufficiency_ratio"]["value"], 1)
+
+    def test_physically_negative_derived_load_is_clipped(self):
+        state = PlantState()
+        state.publish_many(
+            [
+                measurement("grid.active_power", 100),
+                measurement("external_pv.active_power", 0),
+                measurement("asw.active_power", -1000),
+                measurement("asw.pv.active_power", 0),
+            ]
+        )
+        self.assertEqual(state.current()["site.load_power"]["value"], 0)
 
     def test_rollups_and_counter_baselines_survive_restart(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -271,6 +304,215 @@ class Phase5Tests(unittest.TestCase):
         self.assertNotIn("latitude", serialized)
         self.assertNotIn("longitude", serialized)
 
+    def test_weather_cache_and_snapshot_omit_location(self):
+        class Response:
+            def __init__(self, hourly):
+                self.hourly = hourly
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return None
+
+            def read(self):
+                return json.dumps({"hourly": self.hourly}).encode()
+
+        times = ["2026-06-01T00:00", "2026-06-01T01:00"]
+        context = {
+            "time": times,
+            "temperature_2m": [10, 11],
+            "cloud_cover": [20, 30],
+            "cloud_cover_low": [10, 20],
+            "cloud_cover_mid": [5, 5],
+            "cloud_cover_high": [5, 5],
+            "precipitation_probability": [0, 10],
+            "weather_code": [0, 1],
+            "shortwave_radiation": [0, 100],
+            "terrestrial_radiation": [0, 200],
+            "is_day": [0, 1],
+            "global_tilted_irradiance": [0, 150],
+        }
+        west = {"time": times, "global_tilted_irradiance": [0, 120]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            location = root / "location.json"
+            cache = root / "weather-cache.json"
+            location.write_text(
+                json.dumps({"latitude": 1.25, "longitude": 2.5}),
+                encoding="utf-8",
+            )
+            config = WeatherConfig(
+                enabled=True,
+                location_file=str(location),
+                cache_file=str(cache),
+            )
+            store = WeatherStore(config)
+            worker = OpenMeteoWorker(
+                config,
+                (
+                    ForecastPlane("east", 25, -90, 6.2),
+                    ForecastPlane("west", 25, 90, 6.2),
+                ),
+                store,
+                PlantState(),
+            )
+            with patch(
+                "solplanet_fasttalk.weather.urlopen",
+                side_effect=[
+                    Response(context),
+                    Response(west),
+                ],
+            ):
+                worker._fetch()
+            serialized = json.dumps(store.snapshot()) + cache.read_text(
+                encoding="utf-8"
+            )
+        self.assertNotIn("latitude", serialized)
+        self.assertNotIn("longitude", serialized)
+        self.assertEqual(store.snapshot()["points"][1]["pv_potential_w"], 1674)
+
+    def test_solar_elevation_daylight_gate(self):
+        noon = solar_elevation_degrees(
+            dt.datetime(2026, 3, 20, 12, tzinfo=dt.timezone.utc),
+            0,
+            0,
+        )
+        midnight = solar_elevation_degrees(
+            dt.datetime(2026, 3, 20, 0, tzinfo=dt.timezone.utc),
+            0,
+            0,
+        )
+        self.assertGreater(noon, 80)
+        self.assertLess(midnight, -80)
+
+    def test_correction_uses_mature_long_factor_and_forces_night_zero(self):
+        issued = dt.datetime(2026, 3, 20, 12, tzinfo=dt.timezone.utc)
+
+        class History:
+            def forecast_comparison(self, **_):
+                return [
+                    {
+                        "forecast_at": (
+                            issued
+                            - dt.timedelta(days=index % 20, hours=3)
+                        ).isoformat(),
+                        "forecast_power_w": 1000,
+                        "actual_power_w": 800,
+                    }
+                    for index in range(420)
+                ]
+
+            def forecast_samples(self, **_):
+                return []
+
+        config = ForecastSolarConfig(
+            enabled=True,
+            planes=(ForecastPlane("array", 25, 0, 10),),
+        )
+        corrected, summary = ForecastCorrector(
+            config,
+            "UTC",
+            History(),
+        ).correct(
+            [
+                {"timestamp": issued.isoformat(), "power_w": 5000},
+                {
+                    "timestamp": issued.replace(hour=0).isoformat(),
+                    "power_w": 500,
+                },
+            ],
+            issued_at=issued.isoformat(),
+            latitude=0,
+            longitude=0,
+        )
+        self.assertTrue(summary["long_term_ready"])
+        self.assertAlmostEqual(summary["long_term_factor"], 0.8)
+        self.assertEqual(corrected[0]["power_w"], 4000)
+        self.assertEqual(corrected[1]["power_w"], 0)
+        self.assertFalse(corrected[1]["daylight_gate"])
+
+    def test_correction_learns_separate_morning_and_afternoon_bias(self):
+        issued = dt.datetime(2026, 4, 1, 0, tzinfo=dt.timezone.utc)
+
+        class History:
+            def forecast_comparison(self, **_):
+                samples = []
+                for index in range(300):
+                    day = issued - dt.timedelta(days=index % 30 + 1)
+                    for hour, ratio in ((8, 0.7), (16, 0.9)):
+                        samples.append(
+                            {
+                                "forecast_at": day.replace(hour=hour).isoformat(),
+                                "forecast_power_w": 1000,
+                                "actual_power_w": 1000 * ratio,
+                            }
+                        )
+                return samples
+
+            def forecast_samples(self, **_):
+                return []
+
+        config = ForecastSolarConfig(
+            enabled=True,
+            planes=(ForecastPlane("array", 25, 0, 10),),
+        )
+        corrected, summary = ForecastCorrector(
+            config,
+            "UTC",
+            History(),
+        ).correct(
+            [
+                {
+                    "timestamp": issued.replace(hour=8).isoformat(),
+                    "power_w": 5000,
+                },
+                {
+                    "timestamp": issued.replace(hour=16).isoformat(),
+                    "power_w": 5000,
+                },
+            ],
+            issued_at=issued.isoformat(),
+            latitude=0,
+            longitude=0,
+        )
+        self.assertTrue(summary["long_term_ready"])
+        self.assertEqual(corrected[0]["power_w"], 3500)
+        self.assertEqual(corrected[1]["power_w"], 4500)
+        self.assertEqual(len(summary["long_term_time_bucket_factors"]), 2)
+
+    def test_forecast_control_gate_requires_independent_horizon_history(self):
+        now = dt.datetime(2026, 4, 1, tzinfo=dt.timezone.utc)
+
+        class History:
+            def forecast_samples(self, **_):
+                samples = []
+                for index in range(300):
+                    forecast_at = now - dt.timedelta(days=index % 28 + 1)
+                    for horizon in (1, 4, 12):
+                        samples.append(
+                            {
+                                "forecast_at": forecast_at.isoformat(),
+                                "horizon_hours": horizon,
+                                "forecast_power_w": 5000,
+                                "actual_power_w": 5000,
+                                "error_w": 0,
+                            }
+                        )
+                return samples
+
+        config = ForecastSolarConfig(
+            enabled=True,
+            planes=(ForecastPlane("array", 25, 0, 10),),
+        )
+        validation = ForecastCorrector(config, "UTC", History())._validation(now)
+        self.assertTrue(validation["passed"])
+        self.assertEqual(validation["required_days"], 28)
+        self.assertEqual(
+            validation["required_samples_per_scored_horizon"],
+            300,
+        )
+
     def test_complete_example_configuration_loads(self):
         config = load_config(
             REPOSITORY / "config" / "solplanet-fasttalk.example.toml"
@@ -440,6 +682,7 @@ class Phase6Tests(unittest.TestCase):
                 measurement("grid.active_power", 100),
                 measurement("external_pv.active_power", 500),
                 measurement("asw.active_power", 0),
+                measurement("asw.pv.active_power", 0),
             ]
         )
         forecast_config = ForecastSolarConfig(

@@ -27,6 +27,7 @@ class API:
         *,
         tariff=None,
         forecast=None,
+        weather=None,
         plans=None,
         plugins=None,
     ) -> None:
@@ -35,6 +36,7 @@ class API:
         self.history = history
         self.tariff = tariff
         self.forecast = forecast
+        self.weather = weather
         self.plans = plans
         self.plugins = plugins
         self.auth_token = (
@@ -64,7 +66,7 @@ class API:
         api = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "solplanet-fasttalk/0.4.0"
+            server_version = "solplanet-fasttalk/0.5.0"
 
             def do_GET(self) -> None:
                 parsed = urlparse(self.path)
@@ -187,12 +189,23 @@ class API:
                         if self._one(query, "since") or self._one(query, "until"):
                             payload["historical_comparison"] = (
                                 api.history.forecast_comparison(
+                                    provider="fasttalk.corrected",
+                                    since=self._one(query, "since"),
+                                    until=self._one(query, "until"),
+                                    limit=self._limit(query, 1000),
+                                )
+                            )
+                            payload["historical_base_comparison"] = (
+                                api.history.forecast_comparison(
+                                    provider="forecast.solar",
                                     since=self._one(query, "since"),
                                     until=self._one(query, "until"),
                                     limit=self._limit(query, 1000),
                                 )
                             )
                         self._json(payload)
+                    elif parsed.path == "/v1/weather" and api.weather:
+                        self._json(api.weather.snapshot())
                     elif parsed.path == "/v1/plans/current" and api.plans:
                         self._json(api.plans.snapshot())
                     elif parsed.path == "/v1/plans/history":
@@ -492,6 +505,7 @@ class API:
             "streaming": ["server_sent_events"],
             "tariff": self.tariff is not None,
             "forecast": self.forecast is not None,
+            "weather": self.weather is not None,
             "optimisation": self.plans is not None,
             "plugins": (
                 self.plugins.descriptors() if self.plugins is not None else []
@@ -525,6 +539,7 @@ class API:
             "capabilities": self._capabilities()["capabilities"],
             "tariff": self.tariff.current() if self.tariff else None,
             "forecast": self.forecast.snapshot() if self.forecast else None,
+            "weather": self.weather.snapshot() if self.weather else None,
             "plan": self.plans.snapshot() if self.plans else None,
             "plan_history": self.history.plans(limit=12),
             "financials": financials,
