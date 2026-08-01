@@ -269,3 +269,27 @@ catch-up maintenance pass caused one successfully retried lock collision; the
 queue drained to zero with no dropped records, no maintenance failure and
 healthy storage. Subsequent steady-state maintenance should touch only the
 latest boundary and is retained as a soak-test observation.
+
+## Version 0.6.0 load/SOC canary
+
+The HAOS read-only canary on 1 August 2026 confirmed that the live plan exposed
+site-load point/P10/P90 values, native SOC, shadow SOC and an accumulating
+load-driven shadow-SOC range for every one of its 47 available target slots.
+It archived 141 prediction rows: 47 each for load, native SOC and shadow SOC.
+The first actual targets subsequently produced matched, scoreable load and
+native-SOC errors, while the API correctly refused to score counterfactual
+shadow SOC.
+
+The first 15-minute maintenance pass created 1,762 model-ready rollups across
+17 selected signals and archived 73 sanitized -1 to +72-hour weather-context
+points. Privacy inspection found zero latitude/longitude terms in prediction
+features, prediction metadata or weather-context rows.
+
+An initial implementation performed the historical aggregation while holding
+SQLite's write lock. The canary was stopped before the bounded queue filled,
+but timestamp continuity shows an approximately 200-second gap in core signals
+from that aborted run. The aggregation was changed to compute under a WAL read
+snapshot, then insert in 200-row committed slices. The repeated live pass
+completed with all components healthy, 11,941 new measurements written, zero
+write failures, zero queue drops, an empty queue and one successful maintenance
+run. The authenticated daemon was left running with the bounded implementation.
