@@ -167,7 +167,7 @@ class OpenMeteoWorker:
             provider="open-meteo",
             location_private=True,
         )
-        self._load_cache()
+        self.load_cache()
         while not stop.is_set():
             try:
                 self._fetch()
@@ -312,7 +312,9 @@ class OpenMeteoWorker:
         self._save_cache(payload)
         self.requests += 1
 
-    def _load_cache(self) -> None:
+    def load_cache(self) -> None:
+        """Load sanitized weather before dependent workers are started."""
+
         try:
             payload = json.loads(
                 Path(self.config.cache_file).read_text(encoding="utf-8")

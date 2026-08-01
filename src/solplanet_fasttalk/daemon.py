@@ -111,6 +111,10 @@ class Daemon:
                 self.state,
                 self.history,
             )
+            # Make a valid sanitized cache available before Forecast.Solar can
+            # issue its first corrected forecast. The worker refresh remains
+            # asynchronous and cannot delay hardware collection.
+            worker.load_cache()
             self._thread("weather", worker.run)
         else:
             self.state.update_health("weather", status="disabled")
