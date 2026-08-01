@@ -1608,56 +1608,63 @@ class StorageMaintainer:
                         "'external_pv.active_power', "
                         "'site.pv_generation_power') OR value_num >= 0)"
                     )
-                def bucket(column: str) -> str:
-                    return (
-                        "strftime(?, (CAST(strftime('%s', "
-                        + column
-                        + f") AS INTEGER) / {seconds}) * {seconds}, "
-                        + "'unixepoch')"
-                    )
-
-                connection.execute(
+                bucket = (
+                    "strftime(?, (CAST(strftime('%s', observed_at) AS "
+                    f"INTEGER) / {seconds}) * {seconds}, 'unixepoch')"
+                )
+                rows = connection.execute(
                     f"""
-                    INSERT OR REPLACE INTO measurement_rollups (
-                        period_start, period_seconds, name, samples,
-                        value_avg, value_min, value_max, value_last,
-                        unit, quality, source, authority
+                    WITH source AS (
+                        SELECT id, {bucket} AS period_start, name, value_num,
+                               unit, quality, source, authority
+                        FROM measurements
+                        WHERE value_num IS NOT NULL
+                          AND observed_at >= ?
+                          AND observed_at < ?
+                          {selected_clause}
+                          {physical_training_clause}
+                    ), grouped AS (
+                        SELECT period_start, name, COUNT(*) AS samples,
+                               AVG(value_num) AS value_avg,
+                               MIN(value_num) AS value_min,
+                               MAX(value_num) AS value_max,
+                               MAX(id) AS last_id,
+                               MAX(unit) AS unit,
+                               CASE WHEN MIN(quality) = 'good' AND
+                                         MAX(quality) = 'good'
+                                    THEN 'good' ELSE 'mixed' END AS quality,
+                               MAX(source) AS source,
+                               MAX(authority) AS authority
+                        FROM source GROUP BY period_start, name
                     )
-                    SELECT {bucket('observed_at')}, ?, name, COUNT(*),
-                           AVG(value_num), MIN(value_num), MAX(value_num),
-                           (
-                               SELECT last.value_num FROM measurements AS last
-                               WHERE last.name = measurements.name
-                                 AND {bucket('last.observed_at')} =
-                                     {bucket('measurements.observed_at')}
-                                 AND last.value_num IS NOT NULL
-                               ORDER BY last.observed_at DESC, last.id DESC
-                               LIMIT 1
-                           ),
-                           MAX(unit),
-                           CASE WHEN MIN(quality) = 'good' AND
-                                     MAX(quality) = 'good'
-                                THEN 'good' ELSE 'mixed' END,
-                           MAX(source), MAX(authority)
-                    FROM measurements
-                    WHERE value_num IS NOT NULL
-                      AND observed_at >= ?
-                      AND observed_at < ?
-                      {selected_clause}
-                      {physical_training_clause}
-                    GROUP BY {bucket('observed_at')}, name
+                    SELECT grouped.period_start, ?, grouped.name,
+                           grouped.samples, grouped.value_avg,
+                           grouped.value_min, grouped.value_max,
+                           source.value_num, grouped.unit, grouped.quality,
+                           grouped.source, grouped.authority
+                    FROM grouped JOIN source ON source.id = grouped.last_id
                     """,
                     (
-                        pattern,
-                        seconds,
-                        pattern,
                         pattern,
                         since.isoformat(),
                         cutoff.isoformat(),
                         *(selected_names or ()),
-                        pattern,
+                        seconds,
                     ),
-                )
+                ).fetchall()
+                for start in range(0, len(rows), 200):
+                    connection.executemany(
+                        """
+                        INSERT OR REPLACE INTO measurement_rollups (
+                            period_start, period_seconds, name, samples,
+                            value_avg, value_min, value_max, value_last,
+                            unit, quality, source, authority
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        rows[start : start + 200],
+                    )
+                    connection.commit()
+                    time.sleep(0.01)
             connection.execute(
                 """
                 DELETE FROM measurements
