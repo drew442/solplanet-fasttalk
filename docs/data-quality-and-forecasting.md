@@ -147,3 +147,36 @@ Keep the daemon read-only until at least:
 
 Passing these checks is evidence for starting a separate control design
 review. It is not approval to write any inverter register.
+
+## Version 0.5.0 live canary
+
+The HAOS read-only canary on 1 August 2026 confirmed:
+
+- Eastron, ASW, Solis, weather, Forecast.Solar, optimisation, accounting,
+  storage and API components all reached `ok`;
+- Open-Meteo returned 264 sanitized hourly/past points and Forecast.Solar
+  returned 180 corrected points;
+- weather context was active in the correction model after deterministic cache
+  startup ordering;
+- no forecast point below the astronomical daylight threshold had non-zero PV;
+- live ASW PV remained 0 W and `site.pv_generation_power` matched the
+  authoritative external-PV aggregate rather than battery discharge;
+- the model correctly reported only three long-term learning days and refused
+  control readiness for insufficient independent history;
+- the optimizer produced a ready shadow plan while still reporting zero
+  control commands, no execution capability and a failed forecast control
+  gate; and
+- the weather cache contained no location fields and persisted forecast
+  metadata contained no latitude/longitude terms.
+
+The first, aborted canary attempt also exposed SQLite maintenance rebuilding
+the entire raw window inside a write transaction. The previous writer discarded
+eight individual telemetry insert attempts while that lock was held; this is a
+known short gap and those records cannot be reconstructed. Version 0.5.0 was
+corrected so maintenance
+starts after initialization, processes only the incomplete rollup boundary and
+new periods, and measurement writes use atomic batches with bounded retry. The
+catch-up maintenance pass caused one successfully retried lock collision; the
+queue drained to zero with no dropped records, no maintenance failure and
+healthy storage. Subsequent steady-state maintenance should touch only the
+latest boundary and is retained as a soak-test observation.
