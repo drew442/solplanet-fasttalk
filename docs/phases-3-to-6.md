@@ -160,6 +160,14 @@ Every ready, infeasible and no-action decision is stored with its inputs,
 recommendations, explanations, native baseline, costs and constraint
 provenance.
 
+Ready plans also persist versioned site-load, native/no-change SOC and
+counterfactual shadow SOC predictions. Load and native predictions are scored
+by lead-time as actual observations arrive; counterfactual predictions remain
+unscoreable until their policy is actually executed. Selected model inputs are
+retained as 15-minute rollups for 800 days, together with sanitized weather
+forecast vintages. See
+[Data quality and forecasting](data-quality-and-forecasting.md).
+
 Historical data can be replayed without hardware:
 
 ```console
@@ -184,6 +192,9 @@ GET /v1/tariffs/forecast
 GET /v1/forecasts/pv
 GET /v1/forecasts/pv?since=...&until=...
 GET /v1/weather
+GET /v1/predictions/history?signal=...&scenario=...
+GET /v1/predictions/quality?signal=...&scenario=...
+GET /v1/training/coverage
 GET /v1/plans/current
 GET /v1/plans/history
 GET /v1/financials/history

@@ -268,6 +268,7 @@
 
       <div class="legend">
         <span><i class="legend-load"></i>Forecast consumption</span>
+        <span>Dashed load range: historical P10–P90</span>
         <span><i class="legend-solar"></i>Corrected PV</span>
         <span><i class="legend-provider"></i>Provider PV</span>
         <span><i class="legend-plan"></i>Expected grid</span>
@@ -283,6 +284,12 @@
       </div>
       <div class="chart-wrap chart-wrap--small">
         <svg id="futureSocChart" class="line-chart" role="img" aria-label="Forecast battery state of charge"></svg>
+      </div>
+
+      <div class="accuracy-numbers">
+        <div><span>Load forecast accuracy</span><strong id="loadForecastQuality">Learning</strong></div>
+        <div><span>Native SOC forecast accuracy</span><strong id="socForecastQuality">Learning</strong></div>
+        <div><span>Training history</span><strong id="trainingCoverage">Collecting</strong></div>
       </div>
 
       <div class="schedule-head">

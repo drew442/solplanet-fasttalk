@@ -284,6 +284,10 @@ Deliver:
 - short-horizon plant forecast;
 - self-consumption objective followed by tariff-cost objective;
 - battery SOC, charge/discharge limits, reserve and efficiency constraints;
+- versioned site-consumption and battery-SOC forecasts with uncertainty,
+  native/no-change and shadow-counterfactual scenarios;
+- long-lived 15-minute training rollups and causal weather/tariff/constraint
+  feature snapshots;
 - site import/export constraints;
 - recommendation schedule with a human-readable explanation; and
 - replay/simulation against historical data without sending commands.
@@ -296,7 +300,11 @@ Acceptance:
 - missing/stale SOC, grid power or tariff data produces a conservative
   no-action plan;
 - simulation demonstrates improvement over the configured baseline before
-  control work begins.
+  control work begins;
+- load and native-SOC forecasts are independently scored by lead time as
+  actuals arrive; and
+- counterfactual shadow SOC is never incorrectly scored against native actual
+  operation.
 
 ### Phase 7: bounded ASW control
 
@@ -419,6 +427,9 @@ source-authority model before higher-level behaviour is added.
   privacy-reviewed health summaries.
 - Accumulate enough authoritative Eastron production history to quantify
   Forecast.Solar error and shadow-plan replay performance.
+- Accumulate at least 28 days of matched load and native-SOC prediction
+  outcomes in every required lead-time band before selecting a more complex
+  statistical or ML model.
 - Determine and safely test the exact ASW control surface before phase 7.
 - Validate any future tariff revision as a new version rather than mutating the
   archived pre-July 2026 plan.

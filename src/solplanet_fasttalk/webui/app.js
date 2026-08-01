@@ -14,6 +14,9 @@ const state = {
     financials: [],
     forecastComparison: [],
     forecastBaseComparison: [],
+    loadQuality: null,
+    socQuality: null,
+    trainingCoverage: null,
     plans: [],
     tariff: [],
   },
@@ -466,6 +469,8 @@ function renderSchedule() {
 
   const futureSeries = [
     ["forecast_load_w", "Consumption", "#b86242"],
+    ["forecast_load_lower_w", "Load P10", "#d49a83", "3 5"],
+    ["forecast_load_upper_w", "Load P90", "#d49a83", "3 5"],
     ["forecast_pv_w", "PV", "#d9a629"],
     ["forecast_base_pv_w", "Provider PV", "#bd9d49", "4 4"],
     ["expected_grid_power_w", "Expected grid", "#76557f"],
@@ -487,6 +492,22 @@ function renderSchedule() {
       value: number(item.expected_soc_percent),
     })).filter((item) => item.value !== null),
   }, {
+    label: "Shadow SOC lower",
+    color: "#a997b3",
+    dash: "3 5",
+    points: recommendations.map((item) => ({
+      timestamp: item.timestamp,
+      value: number(item.expected_soc_lower_percent),
+    })).filter((item) => item.value !== null),
+  }, {
+    label: "Shadow SOC upper",
+    color: "#a997b3",
+    dash: "3 5",
+    points: recommendations.map((item) => ({
+      timestamp: item.timestamp,
+      value: number(item.expected_soc_upper_percent),
+    })).filter((item) => item.value !== null),
+  }, {
     label: "Native baseline SOC",
     color: "#9ba39e",
     dash: "5 5",
@@ -501,6 +522,30 @@ function renderSchedule() {
   setText(
     "futureSocEnd",
     recommendations.length ? formatPercent(recommendations.at(-1).expected_soc_percent) : "—",
+  );
+
+  const loadQuality = state.historical.loadQuality;
+  const socQuality = state.historical.socQuality;
+  const retained = state.historical.trainingCoverage
+    ?.quarter_hour_measurements || [];
+  const retainedLoad = retained.find((item) => item.signal === "site.load_power");
+  setText(
+    "loadForecastQuality",
+    loadQuality?.samples
+      ? `${loadQuality.days} days · ${formatPower(loadQuality.overall?.mae)} MAE`
+      : "Learning — no scored load predictions yet",
+  );
+  setText(
+    "socForecastQuality",
+    socQuality?.samples
+      ? `${socQuality.days} days · ${Number(socQuality.overall?.mae || 0).toFixed(2)} percentage-point MAE`
+      : "Learning — no scored native SOC predictions yet",
+  );
+  setText(
+    "trainingCoverage",
+    retainedLoad
+      ? `${retainedLoad.points} retained 15-minute load points`
+      : "15-minute training history starts after the next maintenance pass",
   );
 
   const tariffPoints = state.historical.tariff || [];
@@ -679,18 +724,35 @@ async function loadHistory() {
     bucket_seconds: String(Math.max(3600, range.bucket)),
     limit: "2000",
   });
-  const [results, financialPayload, forecastPayload, planPayload, tariffPayload] = await Promise.all([
+  const [
+    results,
+    financialPayload,
+    forecastPayload,
+    planPayload,
+    tariffPayload,
+    loadQuality,
+    socQuality,
+    trainingCoverage,
+  ] = await Promise.all([
     measurementPromise,
     api(`/financials/history?${financialQuery}`),
     api(`/forecasts/pv?${common}`).catch(() => ({ historical_comparison: [] })),
     api(`/plans/history?${common}`),
     api("/tariffs/forecast?hours=48&step_minutes=15").catch(() => ({ points: [] })),
+    api(`/predictions/quality?signal=site.load_power&scenario=expected&since=${encodeURIComponent(since)}`).catch(() => null),
+    api(`/predictions/quality?signal=battery.soc&scenario=native_no_change&since=${encodeURIComponent(since)}`).catch(() => null),
+    state.historical.trainingCoverage
+      ? Promise.resolve(state.historical.trainingCoverage)
+      : api("/training/coverage").catch(() => null),
   ]);
   state.historical.financials = financialPayload.financials || [];
   state.historical.forecastComparison = forecastPayload.historical_comparison || [];
   state.historical.forecastBaseComparison = forecastPayload.historical_base_comparison || [];
   state.historical.plans = planPayload.plans || [];
   state.historical.tariff = tariffPayload.points || [];
+  state.historical.loadQuality = loadQuality;
+  state.historical.socQuality = socQuality;
+  state.historical.trainingCoverage = trainingCoverage;
   renderChart("historyChart", results.slice(0, 4), { includeZero: true });
   renderChart("historySocChart", [results[4]], { percent: true });
   $("historyEmpty").hidden = results.slice(0, 4).some((item) => item.points.length);

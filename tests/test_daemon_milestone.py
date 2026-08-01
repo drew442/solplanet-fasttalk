@@ -352,6 +352,20 @@ class StorageAndAPITests(unittest.TestCase):
                 ) as response:
                     payload = json.load(response)
                 self.assertEqual(payload["measurements"][0]["value"], 1234)
+                with urlopen(
+                    f"http://{host}:{port}/v1/training/coverage",
+                    timeout=2,
+                ) as response:
+                    coverage = json.load(response)
+                self.assertFalse(coverage["location_included"])
+                with urlopen(
+                    f"http://{host}:{port}/v1/predictions/quality"
+                    "?signal=site.load_power&scenario=expected",
+                    timeout=2,
+                ) as response:
+                    quality = json.load(response)
+                self.assertTrue(quality["scoreable"])
+                self.assertEqual(quality["samples"], 0)
             finally:
                 api.close()
                 server_thread.join(2)

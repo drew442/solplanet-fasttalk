@@ -49,6 +49,10 @@ count, minimum and maximum for diagnostics.
 - grid and SOC baselines produced by continuing the inverter's currently
   stored native operating mode and power command;
 - forecast battery SOC;
+- native/no-change and shadow-counterfactual battery SOC trajectories;
+- historical load and native-SOC forecast accuracy as actuals accumulate;
+- the load forecast's historical 10th–90th percentile range; and
+- retained 15-minute training-data coverage;
 - future import and export tariff prices; and
 - upcoming charge, discharge and hold recommendations with their interval
   prices.

@@ -44,8 +44,13 @@ class ASWConfig:
 @dataclass(frozen=True)
 class StorageConfig:
     raw_retention_days: int = 14
+    quarter_hour_retention_days: int = 800
     hourly_retention_days: int = 400
     daily_retention_days: int = 3650
+    prediction_retention_days: int = 800
+    plan_retention_days: int = 800
+    forecast_retention_days: int = 800
+    forecast_context_retention_days: int = 800
     maintenance_interval_seconds: int = 3600
 
 
@@ -287,8 +292,28 @@ def validate_config(config: DaemonConfig) -> None:
         raise ConfigError("solis.mismatch_tolerance_watts cannot be negative")
     for value, name in (
         (config.storage.raw_retention_days, "raw_retention_days"),
+        (
+            config.storage.quarter_hour_retention_days,
+            "quarter_hour_retention_days",
+        ),
         (config.storage.hourly_retention_days, "hourly_retention_days"),
         (config.storage.daily_retention_days, "daily_retention_days"),
+        (
+            config.storage.prediction_retention_days,
+            "prediction_retention_days",
+        ),
+        (
+            config.storage.plan_retention_days,
+            "plan_retention_days",
+        ),
+        (
+            config.storage.forecast_retention_days,
+            "forecast_retention_days",
+        ),
+        (
+            config.storage.forecast_context_retention_days,
+            "forecast_context_retention_days",
+        ),
         (
             config.storage.maintenance_interval_seconds,
             "maintenance_interval_seconds",

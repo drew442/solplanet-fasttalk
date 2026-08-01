@@ -66,7 +66,7 @@ class API:
         api = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "solplanet-fasttalk/0.5.0"
+            server_version = "solplanet-fasttalk/0.6.0"
 
             def do_GET(self) -> None:
                 parsed = urlparse(self.path)
@@ -206,6 +206,55 @@ class API:
                         self._json(payload)
                     elif parsed.path == "/v1/weather" and api.weather:
                         self._json(api.weather.snapshot())
+                    elif parsed.path == "/v1/predictions/history":
+                        signal = self._one(query, "signal")
+                        scenario = self._one(query, "scenario")
+                        if not signal or not scenario:
+                            self._json(
+                                {
+                                    "error": (
+                                        "signal and scenario query parameters "
+                                        "are required"
+                                    )
+                                },
+                                HTTPStatus.BAD_REQUEST,
+                            )
+                            return
+                        self._json(
+                            {
+                                "predictions": api.history.prediction_samples(
+                                    signal=signal,
+                                    scenario=scenario,
+                                    since=self._one(query, "since"),
+                                    until=self._one(query, "until"),
+                                    limit=self._limit(query, 1000),
+                                )
+                            }
+                        )
+                    elif parsed.path == "/v1/predictions/quality":
+                        signal = self._one(query, "signal")
+                        scenario = self._one(query, "scenario")
+                        if not signal or not scenario:
+                            self._json(
+                                {
+                                    "error": (
+                                        "signal and scenario query parameters "
+                                        "are required"
+                                    )
+                                },
+                                HTTPStatus.BAD_REQUEST,
+                            )
+                            return
+                        self._json(
+                            api.history.prediction_quality(
+                                signal=signal,
+                                scenario=scenario,
+                                since=self._one(query, "since"),
+                                until=self._one(query, "until"),
+                            )
+                        )
+                    elif parsed.path == "/v1/training/coverage":
+                        self._json(api.history.training_coverage())
                     elif parsed.path == "/v1/plans/current" and api.plans:
                         self._json(api.plans.snapshot())
                     elif parsed.path == "/v1/plans/history":
@@ -500,6 +549,8 @@ class API:
                 "daily",
                 "financial",
                 "forecast_accuracy",
+                "load_and_soc_prediction_accuracy",
+                "model_training_coverage",
                 "plan_decisions",
             ],
             "streaming": ["server_sent_events"],

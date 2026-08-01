@@ -213,7 +213,7 @@ class OpenMeteoWorker:
                 ),
                 headers={
                     "Accept": "application/json",
-                    "User-Agent": "solplanet-fasttalk/0.5.0",
+                    "User-Agent": "solplanet-fasttalk/0.6.0",
                 },
             )
             with urlopen(
@@ -308,6 +308,22 @@ class OpenMeteoWorker:
                     for point in points
                 ],
                 {"scope": "aggregate theoretical plane irradiance"},
+            )
+            issued = dt.datetime.fromisoformat(payload["fetched_at"])
+            context_points = [
+                point
+                for point in points
+                if -1
+                <= (
+                    dt.datetime.fromisoformat(point["timestamp"]) - issued
+                ).total_seconds()
+                / 3600
+                <= 72
+            ]
+            self.history.record_forecast_context(
+                "open-meteo",
+                payload["fetched_at"],
+                context_points,
             )
         self._save_cache(payload)
         self.requests += 1

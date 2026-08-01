@@ -3,8 +3,16 @@ database = "/var/lib/solplanet-fasttalk/history.sqlite3"
 
 [storage]
 raw_retention_days = 14
+# Long-lived, model-ready 15-minute observations for selected energy, battery,
+# limit and operating-state signals. This supports seasonal load/SOC training
+# without retaining every high-frequency Modbus sample indefinitely.
+quarter_hour_retention_days = 800
 hourly_retention_days = 400
 daily_retention_days = 3650
+prediction_retention_days = 800
+plan_retention_days = 800
+forecast_retention_days = 800
+forecast_context_retention_days = 800
 maintenance_interval_seconds = 3600
 
 [api]

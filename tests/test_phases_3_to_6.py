@@ -164,8 +164,16 @@ class Phase3Tests(unittest.TestCase):
             hourly = reader.measurements(
                 "grid.active_power", resolution="hourly"
             )
+            quarter_hour = reader.measurements(
+                "grid.active_power", resolution="quarter_hour"
+            )
             self.assertEqual(hourly[0]["value"], 200)
             self.assertEqual(hourly[0]["metadata"]["samples"], 2)
+            self.assertEqual(len(quarter_hour), 2)
+            self.assertEqual(
+                sorted(item["value"] for item in quarter_hour),
+                [100, 300],
+            )
             restarted_reader = HistoryReader(database)
             self.assertEqual(
                 restarted_reader.counter_baselines()["grid.energy.import"][
@@ -204,6 +212,64 @@ class Phase3Tests(unittest.TestCase):
             comparison = reader.forecast_comparison()
             self.assertEqual(comparison[0]["error_w"], 100)
             self.assertEqual(comparison[0]["actual_authority"], "authoritative")
+
+    def test_prediction_vintages_are_scored_and_report_training_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "history.sqlite3")
+            initialize_database(database)
+            history = HistoryReader(database)
+            target = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+            issued = target - dt.timedelta(hours=1)
+            history.record_predictions(
+                model="test-load",
+                model_version="v1",
+                signal="site.load_power",
+                scenario="expected",
+                issued_at=issued.isoformat(),
+                unit="W",
+                points=[
+                    {
+                        "timestamp": target.isoformat(),
+                        "value": 1000,
+                        "lower": 800,
+                        "upper": 1200,
+                        "features": {"weather": {"cloud": 50}},
+                    }
+                ],
+                metadata={"location_included": False},
+            )
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    """
+                    INSERT INTO measurements (
+                        observed_at, name, value_num, value_text, unit,
+                        quality, source, authority, access_mode, metadata_json
+                    ) VALUES (?, 'site.load_power', 1100, NULL, 'W', 'good',
+                              'plant_model', 'derived', 'calculated', '{}')
+                    """,
+                    (target.isoformat(),),
+                )
+                connection.commit()
+            quality = history.prediction_quality(
+                signal="site.load_power",
+                scenario="expected",
+            )
+            coverage = history.training_coverage()
+
+        self.assertEqual(quality["samples"], 1)
+        self.assertEqual(quality["overall"]["mae"], 100)
+        self.assertEqual(
+            quality["overall"]["prediction_interval_coverage"],
+            1,
+        )
+        self.assertEqual(coverage["prediction_vintages"][0]["points"], 1)
+        self.assertFalse(coverage["location_included"])
+        self.assertFalse(
+            history.prediction_quality(
+                signal="battery.soc",
+                scenario="shadow_counterfactual",
+            )["scoreable"]
+        )
 
 
 class Phase4Tests(unittest.TestCase):
@@ -338,6 +404,9 @@ class Phase5Tests(unittest.TestCase):
             root = Path(directory)
             location = root / "location.json"
             cache = root / "weather-cache.json"
+            database = str(root / "history.sqlite3")
+            initialize_database(database)
+            history = HistoryReader(database)
             location.write_text(
                 json.dumps({"latitude": 1.25, "longitude": 2.5}),
                 encoding="utf-8",
@@ -356,20 +425,32 @@ class Phase5Tests(unittest.TestCase):
                 ),
                 store,
                 PlantState(),
+                history,
             )
             with patch(
                 "solplanet_fasttalk.weather.urlopen",
-                side_effect=[
-                    Response(context),
-                    Response(west),
-                ],
+                side_effect=[Response(context), Response(west)],
+            ), patch(
+                "solplanet_fasttalk.weather.utc_now",
+                return_value="2026-06-01T00:00:00+00:00",
             ):
                 worker._fetch()
             serialized = json.dumps(store.snapshot()) + cache.read_text(
                 encoding="utf-8"
             )
+            coverage = history.training_coverage()
+            with sqlite3.connect(database) as connection:
+                context_json = connection.execute(
+                    "SELECT features_json FROM forecast_context_points LIMIT 1"
+                ).fetchone()[0]
         self.assertNotIn("latitude", serialized)
         self.assertNotIn("longitude", serialized)
+        self.assertNotIn("latitude", context_json)
+        self.assertNotIn("longitude", context_json)
+        self.assertEqual(
+            coverage["forecast_context_vintages"][0]["points"],
+            2,
+        )
         self.assertEqual(store.snapshot()["points"][1]["pv_potential_w"], 1674)
 
     def test_solar_elevation_daylight_gate(self):
@@ -625,6 +706,50 @@ class Phase5Tests(unittest.TestCase):
 
 
 class Phase6Tests(unittest.TestCase):
+    def test_load_profile_uses_weekday_quarter_hour_distribution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "history.sqlite3")
+            initialize_database(database)
+            history = HistoryReader(database)
+            timezone = ZoneInfo("Australia/Sydney")
+            target = dt.datetime(2026, 6, 29, 10, 15, tzinfo=timezone)
+            with sqlite3.connect(database) as connection:
+                for weeks, value in enumerate((1000, 2000, 3000, 4000), 1):
+                    observed = (
+                        target - dt.timedelta(weeks=weeks)
+                    ).astimezone(dt.timezone.utc)
+                    connection.execute(
+                        """
+                        INSERT INTO measurement_rollups (
+                            period_start, period_seconds, name, samples,
+                            value_avg, value_min, value_max, value_last,
+                            unit, quality, source, authority
+                        ) VALUES (?, 900, 'site.load_power', 10, ?, ?, ?, ?,
+                                  'W', 'good', 'plant_model', 'derived')
+                        """,
+                        (observed.isoformat(), value, value, value, value),
+                    )
+                connection.commit()
+            forecast_config = ForecastSolarConfig(
+                enabled=True,
+                planes=(ForecastPlane("array", 25, 0, 10),),
+            )
+            worker = OptimisationWorker(
+                OptimisationConfig(enabled=True),
+                PlantState(),
+                ForecastStore(forecast_config, "Australia/Sydney"),
+                ZeroHeroTariff(TariffConfig()),
+                PlanStore(),
+                history,
+            )
+            profile = worker._load_profile(target.astimezone(dt.timezone.utc))
+
+        bucket = profile[(target.weekday(), target.hour, target.minute // 15)]
+        self.assertEqual(bucket.samples, 4)
+        self.assertEqual(bucket.median_w, 2500)
+        self.assertEqual(bucket.lower_w, 1300)
+        self.assertAlmostEqual(bucket.upper_w, 3700)
+
     def test_shadow_simulation_is_constrained_and_improves_cost(self):
         config = OptimisationConfig(
             enabled=True,
@@ -643,6 +768,8 @@ class Phase6Tests(unittest.TestCase):
                 dt.datetime(2026, 6, 1, 12, 0, tzinfo=timezone),
                 2000,
                 5000,
+                load_lower_w=1500,
+                load_upper_w=3000,
             ),
             ForecastSlot(
                 dt.datetime(2026, 6, 1, 17, 0, tzinfo=timezone),
@@ -670,6 +797,14 @@ class Phase6Tests(unittest.TestCase):
             self.assertGreaterEqual(
                 recommendation["expected_soc_percent"],
                 config.reserve_soc_percent,
+            )
+            self.assertLessEqual(
+                recommendation["expected_soc_lower_percent"],
+                recommendation["expected_soc_percent"],
+            )
+            self.assertGreaterEqual(
+                recommendation["expected_soc_upper_percent"],
+                recommendation["expected_soc_percent"],
             )
             self.assertTrue(recommendation["explanation"])
 
@@ -760,10 +895,120 @@ class Phase6Tests(unittest.TestCase):
                 },
             }
             history.record_plan(plan)
+            repeated = {
+                **plan,
+                "generated_at": "2026-06-01T00:05:00+00:00",
+            }
+            history.record_plan(repeated)
+            changed = {
+                **plan,
+                "generated_at": "2026-06-01T00:10:00+00:00",
+                "recommendations": [{"action": "charge"}],
+            }
+            history.record_plan(changed)
             stored = history.plans(include_plan=True)[0]
+            stored_count = len(history.plans())
 
         self.assertEqual(stored["estimated_cost_improvement"], 0.5)
-        self.assertEqual(stored["plan"]["recommendations"][0]["action"], "hold")
+        self.assertEqual(stored["plan"]["recommendations"][0]["action"], "charge")
+        self.assertEqual(stored_count, 2)
+
+    def test_plan_persists_load_and_native_and_shadow_soc_predictions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "history.sqlite3")
+            initialize_database(database)
+            history = HistoryReader(database)
+            forecast_config = ForecastSolarConfig(
+                enabled=True,
+                planes=(ForecastPlane("array", 25, 0, 10),),
+            )
+            worker = OptimisationWorker(
+                OptimisationConfig(enabled=True),
+                PlantState(),
+                ForecastStore(forecast_config, "Australia/Sydney"),
+                ZeroHeroTariff(TariffConfig()),
+                PlanStore(),
+                history,
+            )
+            plan = {
+                "generated_at": "2026-06-01T00:00:00+00:00",
+                "inputs": {
+                    "battery.soc": {"value": 50},
+                    "grid.active_power": {"value": 1000},
+                },
+                "load_forecast": {"method": "test"},
+                "pv_forecast_quality": {"control_ready": False},
+                "simulation": {
+                    "baseline": {"policy": {"mode": "hold"}}
+                },
+                "recommendations": [
+                    {
+                        "timestamp": "2026-06-01T01:00:00+00:00",
+                        "action": "hold",
+                        "forecast_load_w": 2000,
+                        "forecast_load_lower_w": 1500,
+                        "forecast_load_upper_w": 2600,
+                        "forecast_load_samples": 12,
+                        "forecast_pv_w": 1000,
+                        "forecast_base_pv_w": 1100,
+                        "weather": {"cloud_cover_percent": 40},
+                        "import_price_per_kwh": 0.2,
+                        "export_price_per_kwh": 0.1,
+                        "constraints": {"reserve_soc_percent": 15},
+                        "baseline_expected_soc_percent": 50,
+                        "expected_soc_percent": 49,
+                        "expected_soc_lower_percent": 45,
+                        "expected_soc_upper_percent": 53,
+                        "baseline_grid_power_w": 1000,
+                        "expected_grid_power_w": 500,
+                        "baseline_battery_power_w": 0,
+                        "battery_power_w": 500,
+                    }
+                ],
+            }
+            worker._record_predictions(plan)
+            early = {
+                **plan,
+                "generated_at": "2026-06-01T01:00:00+00:00",
+                "recommendations": [
+                    {
+                        **plan["recommendations"][0],
+                        "timestamp": "2026-06-01T02:00:00+00:00",
+                    }
+                ],
+            }
+            worker._record_predictions(early)
+            later = {
+                **early,
+                "generated_at": "2026-06-01T03:00:00+00:00",
+                "recommendations": [
+                    {
+                        **plan["recommendations"][0],
+                        "timestamp": "2026-06-01T04:00:00+00:00",
+                    }
+                ],
+            }
+            worker._record_predictions(later)
+            coverage = history.training_coverage()
+            load = history.prediction_samples(
+                signal="site.load_power",
+                scenario="expected",
+            )
+            with sqlite3.connect(database) as connection:
+                location_terms = connection.execute(
+                    """
+                    SELECT COUNT(*) FROM prediction_points
+                    WHERE lower(features_json) LIKE '%latitude%'
+                       OR lower(metadata_json) LIKE '%longitude%'
+                    """
+                ).fetchone()[0]
+
+        self.assertEqual(len(coverage["prediction_vintages"]), 3)
+        self.assertTrue(
+            all(item["points"] == 2 for item in coverage["prediction_vintages"])
+        )
+        self.assertEqual(load, [])  # No future actual exists in this fixture.
+        self.assertEqual(location_terms, 0)
 
 
 if __name__ == "__main__":

@@ -218,7 +218,8 @@ historical plant flow, financials, forecast accuracy, forecasts,
 recommendations and the evidence behind the optimiser's decisions. See
 [phases 3–6](docs/phases-3-to-6.md) for exact daemon behaviour and
 [data quality and forecasting](docs/data-quality-and-forecasting.md) for the
-measurement audit, weather-assisted correction and independent accuracy gate.
+measurement audit, weather-assisted correction, site-load/SOC prediction
+datasets and independent accuracy gates.
 
 ## Reliability and security
 

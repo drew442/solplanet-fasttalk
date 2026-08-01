@@ -89,8 +89,97 @@ Site consumption uses a separate two-timescale model:
   long-term bucket, requires three samples and is bounded to 0.5–1.5; and
 - the short-term factor decays over four hours.
 
+The long-term key is now the local weekday and exact 15-minute position rather
+than a whole-hour average. A bucket requires four historical observations. Its
+median is the point forecast and its 10th/90th percentiles form a visible
+uncertainty interval. Up to 730 days are considered when retained data exists.
+
 This is intentionally simple and inspectable. More features should be added
 only after their out-of-sample contribution is measured.
+
+## Site-load and battery-SOC prediction records
+
+Every successful shadow-plan run now persists versioned prediction vintages
+for each target interval:
+
+| Signal | Scenario | Scoreable against current actuals? |
+| --- | --- | --- |
+| `site.load_power` | `expected` | yes |
+| `battery.soc` | `native_no_change` | yes |
+| `battery.soc` | `shadow_counterfactual` | no, because the proposed policy was not executed |
+
+The native SOC forecast continues the inverter's observed native command until
+its observed SOC bound. Its subsequent error measures how adequate that
+no-change assumption is. The shadow SOC forecast uses planned battery power,
+capacity, efficiency, reserve, maximum SOC, manufacturer limits and live BMS
+limits. It is retained for simulation and later policy evaluation, but is
+explicitly protected from invalid comparison with native actual operation.
+
+The shadow SOC trace includes a conservative accumulating lower/upper range
+derived from the site's P10–P90 load uncertainty and charge/discharge
+efficiency. It is labelled as load-driven uncertainty: PV forecast uncertainty
+is not yet included, so this range must not be interpreted as a calibrated SOC
+confidence interval. Persisted outcomes will allow that interval to be
+calibrated later.
+
+Each prediction point records the model and version, issue and target times,
+lead time, point value, optional uncertainty interval, scenario and unit. Its
+causal feature snapshot includes:
+
+- current SOC and grid state at issue time;
+- forecast load, load interval and historical sample count;
+- corrected and provider PV forecasts;
+- sanitized cloud, irradiance, temperature and precipitation context;
+- applicable import/export prices and local calendar position;
+- proposed action and battery/site constraints; and
+- native operating-mode assumption and forecast-quality state.
+
+No future actual value is copied into a feature record. Actuals are joined only
+when accuracy is queried, preventing training leakage.
+
+## Model-ready historical retention
+
+High-frequency raw measurements remain bounded to 14 days. A selected set of
+plant, battery, BMS-limit and operating-mode signals is additionally retained
+at 15-minute resolution for 800 days. Rollups retain sample count, mean,
+minimum, maximum, last value, unit, quality, source and authority. This provides
+seasonal history without retaining every one-second Modbus observation.
+
+Sanitized Open-Meteo forecast vintages are retained separately for 800 days,
+including the weather prediction as it existed at each hourly archive time for
+the operational -1 to +72-hour window. Load and SOC prediction vintages are
+retained for 800 days. Grid/battery observations, tariff intervals, complete
+plan decisions, PV forecast vintages and observed outcomes remain joinable by
+aware UTC timestamps.
+
+Complete shadow plans are still generated on their operational schedule. Plan
+history retains every status/current-action transition plus an unchanged
+three-hour checkpoint. The separate load/native-SOC/shadow-SOC prediction
+vintages are also archived every three hours. With 15-minute targets this still
+yields dense samples in every decision horizon without duplicating every
+unchanged five-minute plan into hundreds of millions of rows. Both archives
+have an 800-day retention boundary.
+
+The coverage API reports counts and date spans without returning private values:
+
+```text
+GET /v1/training/coverage
+GET /v1/predictions/history?signal=site.load_power&scenario=expected
+GET /v1/predictions/quality?signal=site.load_power&scenario=expected
+GET /v1/predictions/quality?signal=battery.soc&scenario=native_no_change
+```
+
+Prediction quality includes lead-time-bucket sample count, MAE, RMSE, bias,
+weighted absolute percentage error and uncertainty-interval coverage. Dataset
+readiness requires 28 distinct days and 300 matched samples in each of the
+0–2, 2–8 and 8–24-hour bands. Readiness means there is enough coverage to
+evaluate a model; it does not mean the model is accurate or safe for control.
+
+This dataset supports future regression, probabilistic forecasting or ML, but
+the daemon does not assume that an AI model will outperform the transparent
+baseline. Candidate models must use chronological train/validation/test splits,
+preserve forecast issue time, compare against the baseline by horizon and
+weather regime, and pass the same independent safety gates.
 
 ## Independent accuracy gate
 

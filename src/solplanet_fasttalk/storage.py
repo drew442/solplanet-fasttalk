@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import datetime as dt
+import math
 import sqlite3
+import statistics
 import threading
 import time
 from pathlib import Path
@@ -76,6 +78,34 @@ CREATE TABLE IF NOT EXISTS forecast_points (
 );
 CREATE INDEX IF NOT EXISTS forecast_points_time
     ON forecast_points(provider, forecast_at, issued_at);
+CREATE TABLE IF NOT EXISTS forecast_context_points (
+    id INTEGER PRIMARY KEY,
+    provider TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    forecast_at TEXT NOT NULL,
+    features_json TEXT NOT NULL,
+    UNIQUE(provider, issued_at, forecast_at)
+);
+CREATE INDEX IF NOT EXISTS forecast_context_time
+    ON forecast_context_points(provider, forecast_at, issued_at);
+CREATE TABLE IF NOT EXISTS prediction_points (
+    id INTEGER PRIMARY KEY,
+    model TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    signal TEXT NOT NULL,
+    scenario TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    prediction_at TEXT NOT NULL,
+    value REAL NOT NULL,
+    unit TEXT NOT NULL,
+    lower_value REAL,
+    upper_value REAL,
+    features_json TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    UNIQUE(model, model_version, signal, scenario, issued_at, prediction_at)
+);
+CREATE INDEX IF NOT EXISTS prediction_points_time
+    ON prediction_points(signal, scenario, prediction_at, issued_at);
 CREATE TABLE IF NOT EXISTS financial_intervals (
     period_start TEXT PRIMARY KEY,
     local_date TEXT NOT NULL,
@@ -120,6 +150,30 @@ CREATE TABLE IF NOT EXISTS plan_history (
 CREATE INDEX IF NOT EXISTS plan_history_time
     ON plan_history(generated_at);
 """
+
+
+# Selected signals retained at 15-minute resolution for seasonal forecasting
+# and future model training. Identity strings, verbose diagnostics and redundant
+# phase data stay at their existing raw/hourly retention levels.
+MODEL_TRAINING_SIGNALS = (
+    "grid.active_power",
+    "external_pv.active_power",
+    "site.load_power",
+    "site.pv_generation_power",
+    "site.local_supply_power",
+    "asw.active_power",
+    "battery.power",
+    "battery.soc",
+    "battery.soh",
+    "battery.voltage",
+    "battery.temperature",
+    "battery.limit.charge_current",
+    "battery.limit.discharge_current",
+    "battery.limit.soc_lower",
+    "battery.limit.soc_upper",
+    "asw.control.charge_discharge_state",
+    "asw.control.power_command",
+)
 
 
 def initialize_database(path: str) -> None:
@@ -286,9 +340,15 @@ class HistoryReader:
         until: str | None = None,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
-        seconds = {"hourly": 3600, "daily": 86400}.get(resolution)
+        seconds = {
+            "quarter_hour": 900,
+            "hourly": 3600,
+            "daily": 86400,
+        }.get(resolution)
         if seconds is None:
-            raise ValueError("resolution must be raw, hourly, or daily")
+            raise ValueError(
+                "resolution must be raw, quarter_hour, hourly, or daily"
+            )
         clauses = ["name = ?", "period_seconds = ?"]
         values: list[Any] = [name, seconds]
         if since:
@@ -297,7 +357,7 @@ class HistoryReader:
         if until:
             clauses.append("period_start <= ?")
             values.append(until)
-        values.append(max(1, min(limit, 10000)))
+        values.append(max(1, min(limit, 100000)))
         with sqlite3.connect(self.path) as connection:
             rows = connection.execute(
                 f"""
@@ -488,6 +548,438 @@ class HistoryReader:
                 ),
             )
             connection.commit()
+
+    def record_forecast_context(
+        self,
+        provider: str,
+        issued_at: str,
+        points: list[dict[str, Any]],
+    ) -> None:
+        """Persist sanitized forecast vintages for later feature engineering."""
+
+        if not points:
+            return
+        with sqlite3.connect(self.path, timeout=30.0) as connection:
+            latest = connection.execute(
+                """
+                SELECT MAX(issued_at) FROM forecast_context_points
+                WHERE provider = ?
+                """,
+                (provider,),
+            ).fetchone()[0]
+            if latest and (
+                dt_from_iso(issued_at) - dt_from_iso(latest)
+            ).total_seconds() < 3600:
+                return
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO forecast_context_points (
+                    provider, issued_at, forecast_at, features_json
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    (
+                        provider,
+                        issued_at,
+                        point["timestamp"],
+                        json.dumps(
+                            {
+                                key: value
+                                for key, value in point.items()
+                                if key != "timestamp"
+                            },
+                            separators=(",", ":"),
+                        ),
+                    )
+                    for point in points
+                ),
+            )
+            connection.commit()
+
+    def record_predictions(
+        self,
+        *,
+        model: str,
+        model_version: str,
+        signal: str,
+        scenario: str,
+        issued_at: str,
+        unit: str,
+        points: list[dict[str, Any]],
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist a complete prediction vintage and its causal features."""
+
+        if not points:
+            return
+        shared = json.dumps(metadata or {}, separators=(",", ":"))
+        with sqlite3.connect(self.path, timeout=30.0) as connection:
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO prediction_points (
+                    model, model_version, signal, scenario, issued_at,
+                    prediction_at, value, unit, lower_value, upper_value,
+                    features_json, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        model,
+                        model_version,
+                        signal,
+                        scenario,
+                        issued_at,
+                        point["timestamp"],
+                        float(point["value"]),
+                        unit,
+                        (
+                            float(point["lower"])
+                            if point.get("lower") is not None
+                            else None
+                        ),
+                        (
+                            float(point["upper"])
+                            if point.get("upper") is not None
+                            else None
+                        ),
+                        json.dumps(
+                            point.get("features") or {},
+                            separators=(",", ":"),
+                        ),
+                        shared,
+                    )
+                    for point in points
+                ),
+            )
+            connection.commit()
+
+    def latest_prediction_issue(self) -> str | None:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                """
+                SELECT issued_at FROM prediction_points
+                GROUP BY issued_at
+                HAVING COUNT(DISTINCT signal || ':' || scenario) >= 3
+                ORDER BY issued_at DESC LIMIT 1
+                """
+            ).fetchone()
+        return row[0] if row and row[0] else None
+
+    def prediction_samples(
+        self,
+        *,
+        signal: str,
+        scenario: str,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 50000,
+    ) -> list[dict[str, Any]]:
+        """Match prediction vintages to actual raw or 15-minute observations."""
+
+        clauses = ["signal = ?", "scenario = ?"]
+        values: list[Any] = [signal, scenario]
+        if since:
+            clauses.append("prediction_at >= ?")
+            values.append(since)
+        if until:
+            clauses.append("prediction_at <= ?")
+            values.append(until)
+        values.append(max(1, min(limit, 100000)))
+        with sqlite3.connect(self.path) as connection:
+            predictions = connection.execute(
+                f"""
+                SELECT model, model_version, issued_at, prediction_at,
+                       value, unit, lower_value, upper_value,
+                       features_json, metadata_json
+                FROM prediction_points
+                WHERE {' AND '.join(clauses)}
+                ORDER BY prediction_at DESC, issued_at DESC
+                LIMIT ?
+                """,
+                values,
+            ).fetchall()
+            if not predictions:
+                return []
+            earliest = min(row[3] for row in predictions)
+            latest = max(row[3] for row in predictions)
+            raw = connection.execute(
+                """
+                SELECT
+                    CAST(strftime('%s', observed_at) AS INTEGER) / 60,
+                    AVG(value_num)
+                FROM measurements
+                WHERE name = ? AND value_num IS NOT NULL
+                  AND julianday(observed_at) >= julianday(?, '-15 minutes')
+                  AND julianday(observed_at) <= julianday(?, '+15 minutes')
+                GROUP BY 1
+                """,
+                (signal, earliest, latest),
+            ).fetchall()
+            rollups = connection.execute(
+                """
+                SELECT
+                    CAST(strftime('%s', period_start) AS INTEGER) / 60,
+                    value_avg
+                FROM measurement_rollups
+                WHERE name = ? AND period_seconds = 900
+                  AND value_avg IS NOT NULL
+                  AND julianday(period_start) >= julianday(?, '-15 minutes')
+                  AND julianday(period_start) <= julianday(?, '+15 minutes')
+                """,
+                (signal, earliest, latest),
+            ).fetchall()
+        actual_by_minute = {int(row[0]): float(row[1]) for row in rollups}
+        actual_by_minute.update({int(row[0]): float(row[1]) for row in raw})
+        result = []
+        for row in predictions:
+            target = dt_from_iso(row[3])
+            minute = int(target.timestamp()) // 60
+            candidates = [
+                (abs(offset), actual_by_minute[minute + offset])
+                for offset in range(-15, 16)
+                if minute + offset in actual_by_minute
+            ]
+            if not candidates:
+                continue
+            _, actual = min(candidates, key=lambda item: item[0])
+            result.append(
+                {
+                    "model": row[0],
+                    "model_version": row[1],
+                    "signal": signal,
+                    "scenario": scenario,
+                    "issued_at": row[2],
+                    "prediction_at": row[3],
+                    "horizon_hours": round(
+                        (target - dt_from_iso(row[2])).total_seconds() / 3600,
+                        4,
+                    ),
+                    "predicted_value": float(row[4]),
+                    "actual_value": actual,
+                    "error": actual - float(row[4]),
+                    "unit": row[5],
+                    "lower_value": row[6],
+                    "upper_value": row[7],
+                    "interval_contains_actual": (
+                        bool(row[6] <= actual <= row[7])
+                        if row[6] is not None and row[7] is not None
+                        else None
+                    ),
+                    "features": json.loads(row[8]),
+                    "metadata": json.loads(row[9]),
+                }
+            )
+        return result
+
+    def training_coverage(self) -> dict[str, Any]:
+        """Describe retained model inputs without exposing their values."""
+
+        with sqlite3.connect(self.path) as connection:
+            rollups = connection.execute(
+                """
+                SELECT name, COUNT(*), MIN(period_start), MAX(period_start)
+                FROM measurement_rollups
+                WHERE period_seconds = 900
+                GROUP BY name ORDER BY name
+                """
+            ).fetchall()
+            predictions = connection.execute(
+                """
+                SELECT signal, scenario, model, model_version, COUNT(*),
+                       MIN(issued_at), MAX(issued_at),
+                       MIN(prediction_at), MAX(prediction_at)
+                FROM prediction_points
+                GROUP BY signal, scenario, model, model_version
+                ORDER BY signal, scenario
+                """
+            ).fetchall()
+            contexts = connection.execute(
+                """
+                SELECT provider, COUNT(*), MIN(issued_at), MAX(issued_at),
+                       MIN(forecast_at), MAX(forecast_at)
+                FROM forecast_context_points
+                GROUP BY provider ORDER BY provider
+                """
+            ).fetchall()
+            forecasts = connection.execute(
+                """
+                SELECT provider, COUNT(*), MIN(issued_at), MAX(issued_at),
+                       MIN(forecast_at), MAX(forecast_at)
+                FROM forecast_points
+                GROUP BY provider ORDER BY provider
+                """
+            ).fetchall()
+        return {
+            "quarter_hour_measurements": [
+                {
+                    "signal": row[0],
+                    "points": int(row[1]),
+                    "first": row[2],
+                    "last": row[3],
+                }
+                for row in rollups
+            ],
+            "prediction_vintages": [
+                {
+                    "signal": row[0],
+                    "scenario": row[1],
+                    "model": row[2],
+                    "model_version": row[3],
+                    "points": int(row[4]),
+                    "first_issued": row[5],
+                    "last_issued": row[6],
+                    "first_target": row[7],
+                    "last_target": row[8],
+                }
+                for row in predictions
+            ],
+            "forecast_context_vintages": [
+                {
+                    "provider": row[0],
+                    "points": int(row[1]),
+                    "first_issued": row[2],
+                    "last_issued": row[3],
+                    "first_target": row[4],
+                    "last_target": row[5],
+                }
+                for row in contexts
+            ],
+            "pv_forecast_vintages": [
+                {
+                    "provider": row[0],
+                    "points": int(row[1]),
+                    "first_issued": row[2],
+                    "last_issued": row[3],
+                    "first_target": row[4],
+                    "last_target": row[5],
+                }
+                for row in forecasts
+            ],
+            "location_included": False,
+        }
+
+    def prediction_quality(
+        self,
+        *,
+        signal: str,
+        scenario: str,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 100000,
+    ) -> dict[str, Any]:
+        scoreable = scenario in ("expected", "native_no_change")
+        if not scoreable:
+            return {
+                "signal": signal,
+                "scenario": scenario,
+                "scoreable": False,
+                "reason": (
+                    "counterfactual shadow predictions cannot be compared "
+                    "with actual operation until that policy is executed"
+                ),
+                "samples": 0,
+                "days": 0,
+                "by_horizon": {},
+            }
+        samples = self.prediction_samples(
+            signal=signal,
+            scenario=scenario,
+            since=since,
+            until=until,
+            limit=limit,
+        )
+        buckets = {
+            "0_to_2_hours": [],
+            "2_to_8_hours": [],
+            "8_to_24_hours": [],
+            "24_plus_hours": [],
+        }
+        for sample in samples:
+            horizon = sample["horizon_hours"]
+            key = (
+                "0_to_2_hours"
+                if horizon <= 2
+                else "2_to_8_hours"
+                if horizon <= 8
+                else "8_to_24_hours"
+                if horizon <= 24
+                else "24_plus_hours"
+            )
+            buckets[key].append(sample)
+
+        def metrics(values: list[dict[str, Any]]) -> dict[str, Any]:
+            errors = [float(value["error"]) for value in values]
+            actuals = [abs(float(value["actual_value"])) for value in values]
+            interval_values = [
+                value["interval_contains_actual"]
+                for value in values
+                if value["interval_contains_actual"] is not None
+            ]
+            return {
+                "samples": len(values),
+                "mae": (
+                    round(statistics.fmean(abs(error) for error in errors), 5)
+                    if errors
+                    else None
+                ),
+                "rmse": (
+                    round(
+                        math.sqrt(statistics.fmean(error * error for error in errors)),
+                        5,
+                    )
+                    if errors
+                    else None
+                ),
+                "bias": (
+                    round(statistics.fmean(errors), 5) if errors else None
+                ),
+                "weighted_absolute_percentage_error": (
+                    round(sum(abs(error) for error in errors) / sum(actuals), 6)
+                    if errors and sum(actuals) > 0
+                    else None
+                ),
+                "prediction_interval_coverage": (
+                    round(
+                        sum(bool(value) for value in interval_values)
+                        / len(interval_values),
+                        6,
+                    )
+                    if interval_values
+                    else None
+                ),
+            }
+
+        days = {
+            dt_from_iso(sample["prediction_at"]).date() for sample in samples
+        }
+        by_horizon = {
+            name: metrics(values) for name, values in buckets.items()
+        }
+        required = (
+            by_horizon["0_to_2_hours"],
+            by_horizon["2_to_8_hours"],
+            by_horizon["8_to_24_hours"],
+        )
+        dataset_ready = len(days) >= 28 and all(
+            value["samples"] >= 300 for value in required
+        )
+        return {
+            "signal": signal,
+            "scenario": scenario,
+            "scoreable": True,
+            "unit": samples[0]["unit"] if samples else None,
+            "samples": len(samples),
+            "days": len(days),
+            "dataset_ready": dataset_ready,
+            "required_days": 28,
+            "required_samples_per_horizon": 300,
+            "overall": metrics(samples),
+            "by_horizon": by_horizon,
+            "note": (
+                "dataset readiness indicates sample coverage only; model "
+                "accuracy must be assessed separately before control"
+            ),
+        }
 
     def forecast_comparison(
         self,
@@ -955,6 +1447,39 @@ class HistoryReader:
         baseline = simulation.get("baseline") or {}
         optimized = simulation.get("optimized") or {}
         with sqlite3.connect(self.path, timeout=30.0) as connection:
+            latest = connection.execute(
+                """
+                SELECT generated_at, status, reason, plan_json
+                FROM plan_history ORDER BY generated_at DESC LIMIT 1
+                """
+            ).fetchone()
+            current_action = next(
+                (
+                    item.get("action")
+                    for item in plan.get("recommendations") or []
+                    if item.get("action")
+                ),
+                None,
+            )
+            if latest:
+                previous = json.loads(latest[3])
+                previous_action = next(
+                    (
+                        item.get("action")
+                        for item in previous.get("recommendations") or []
+                        if item.get("action")
+                    ),
+                    None,
+                )
+                unchanged = (
+                    latest[1] == str(plan.get("status", "unknown"))
+                    and latest[2] == plan.get("reason")
+                    and previous_action == current_action
+                )
+                if unchanged and (
+                    dt_from_iso(generated_at) - dt_from_iso(latest[0])
+                ).total_seconds() < 3 * 3600:
+                    return
             connection.execute(
                 """
                 INSERT OR REPLACE INTO plan_history (
@@ -1035,16 +1560,24 @@ class StorageMaintainer:
     def run_once(self) -> None:
         with sqlite3.connect(self.path) as connection:
             now = dt.datetime.now(dt.timezone.utc)
-            for seconds, pattern, retention_days in (
+            for seconds, pattern, retention_days, selected_names in (
+                (
+                    900,
+                    "%Y-%m-%dT%H:%M:00+00:00",
+                    self.config.raw_retention_days,
+                    MODEL_TRAINING_SIGNALS,
+                ),
                 (
                     3600,
                     "%Y-%m-%dT%H:00:00+00:00",
                     self.config.raw_retention_days,
+                    None,
                 ),
                 (
                     86400,
                     "%Y-%m-%dT00:00:00+00:00",
                     self.config.raw_retention_days,
+                    None,
                 ),
             ):
                 latest = connection.execute(
@@ -1064,20 +1597,39 @@ class StorageMaintainer:
                     if latest
                     else cutoff - dt.timedelta(days=retention_days)
                 )
+                selected_clause = ""
+                physical_training_clause = ""
+                if selected_names:
+                    selected_clause = " AND name IN ({})".format(
+                        ",".join("?" for _ in selected_names)
+                    )
+                    physical_training_clause = (
+                        " AND (name NOT IN ('site.load_power', "
+                        "'external_pv.active_power', "
+                        "'site.pv_generation_power') OR value_num >= 0)"
+                    )
+                def bucket(column: str) -> str:
+                    return (
+                        "strftime(?, (CAST(strftime('%s', "
+                        + column
+                        + f") AS INTEGER) / {seconds}) * {seconds}, "
+                        + "'unixepoch')"
+                    )
+
                 connection.execute(
-                    """
+                    f"""
                     INSERT OR REPLACE INTO measurement_rollups (
                         period_start, period_seconds, name, samples,
                         value_avg, value_min, value_max, value_last,
                         unit, quality, source, authority
                     )
-                    SELECT strftime(?, observed_at), ?, name, COUNT(*),
+                    SELECT {bucket('observed_at')}, ?, name, COUNT(*),
                            AVG(value_num), MIN(value_num), MAX(value_num),
                            (
                                SELECT last.value_num FROM measurements AS last
                                WHERE last.name = measurements.name
-                                 AND strftime(?, last.observed_at) =
-                                     strftime(?, measurements.observed_at)
+                                 AND {bucket('last.observed_at')} =
+                                     {bucket('measurements.observed_at')}
                                  AND last.value_num IS NOT NULL
                                ORDER BY last.observed_at DESC, last.id DESC
                                LIMIT 1
@@ -1091,7 +1643,9 @@ class StorageMaintainer:
                     WHERE value_num IS NOT NULL
                       AND observed_at >= ?
                       AND observed_at < ?
-                    GROUP BY strftime(?, observed_at), name
+                      {selected_clause}
+                      {physical_training_clause}
+                    GROUP BY {bucket('observed_at')}, name
                     """,
                     (
                         pattern,
@@ -1100,6 +1654,7 @@ class StorageMaintainer:
                         pattern,
                         since.isoformat(),
                         cutoff.isoformat(),
+                        *(selected_names or ()),
                         pattern,
                     ),
                 )
@@ -1109,6 +1664,16 @@ class StorageMaintainer:
                 WHERE julianday(observed_at) < julianday('now', ?)
                 """,
                 (f"-{self.config.raw_retention_days} days",),
+            )
+            connection.execute(
+                """
+                DELETE FROM measurement_rollups
+                WHERE period_seconds = 900
+                  AND julianday(period_start) < julianday('now', ?)
+                """,
+                (
+                    f"-{self.config.quarter_hour_retention_days} days",
+                ),
             )
             connection.execute(
                 """
@@ -1125,6 +1690,36 @@ class StorageMaintainer:
                   AND julianday(period_start) < julianday('now', ?)
                 """,
                 (f"-{self.config.daily_retention_days} days",),
+            )
+            connection.execute(
+                """
+                DELETE FROM prediction_points
+                WHERE julianday(issued_at) < julianday('now', ?)
+                """,
+                (f"-{self.config.prediction_retention_days} days",),
+            )
+            connection.execute(
+                """
+                DELETE FROM plan_history
+                WHERE julianday(generated_at) < julianday('now', ?)
+                """,
+                (f"-{self.config.plan_retention_days} days",),
+            )
+            connection.execute(
+                """
+                DELETE FROM forecast_points
+                WHERE julianday(issued_at) < julianday('now', ?)
+                """,
+                (f"-{self.config.forecast_retention_days} days",),
+            )
+            connection.execute(
+                """
+                DELETE FROM forecast_context_points
+                WHERE julianday(issued_at) < julianday('now', ?)
+                """,
+                (
+                    f"-{self.config.forecast_context_retention_days} days",
+                ),
             )
             connection.commit()
         self.runs += 1
