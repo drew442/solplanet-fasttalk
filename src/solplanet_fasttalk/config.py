@@ -124,6 +124,11 @@ class OptimisationConfig:
     step_minutes: int = 15
     battery_capacity_kwh: float = 53.76
     reserve_soc_percent: float = 15.0
+    # Until forecast evidence matures, shadow export plans protect this larger
+    # SOC reserve. The effective reserve continuously falls toward
+    # reserve_soc_percent as independently scored confidence improves.
+    untrusted_reserve_soc_percent: float = 85.0
+    forecast_confidence_full_days: int = 84
     maximum_soc_percent: float = 95.0
     max_charge_watts: float = 12000.0
     max_discharge_watts: float = 12000.0
@@ -404,6 +409,19 @@ def validate_config(config: DaemonConfig) -> None:
         raise ConfigError("optimisation.step_minutes must be 5, 15, 30, or 60")
     if not 0 <= optimisation.reserve_soc_percent < optimisation.maximum_soc_percent <= 100:
         raise ConfigError("optimisation SOC limits are invalid")
+    if not (
+        optimisation.reserve_soc_percent
+        <= optimisation.untrusted_reserve_soc_percent
+        <= 100
+    ):
+        raise ConfigError(
+            "optimisation.untrusted_reserve_soc_percent must be between "
+            "reserve_soc_percent and 100"
+        )
+    if optimisation.forecast_confidence_full_days <= 0:
+        raise ConfigError(
+            "optimisation.forecast_confidence_full_days must be greater than zero"
+        )
 
     def clock_minutes(value: str, field: str) -> int:
         if not isinstance(value, str):

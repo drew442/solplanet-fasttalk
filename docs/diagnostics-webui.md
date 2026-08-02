@@ -222,12 +222,25 @@ GET /v1/tariffs/forecast?hours=...&step_minutes=...
 GET /v1/financials/history?since=...&until=...&bucket_seconds=...
 GET /v1/financials/summary?since=...&until=...
 GET /v1/plans/history?since=...&until=...
+GET /v1/storage
 ```
 
 `/v1/diagnostics` returns one coherent browser refresh payload containing the
 plant, current measurements, health, devices, capabilities, current tariff,
 forecast, plan and recent events. It contains no Forecast.Solar API key or
 plant coordinates.
+
+The System section shows the current SQLite database, WAL and shared-memory
+footprint as one on-disk total. It also shows recent growth per day and linear
+30-day/one-year projections. The estimate is visibly labelled `rough` while it
+uses database age, becomes `preliminary` after six hours of maintenance size
+observations, and becomes `established` after seven days. Projections state
+that configured retention pruning will eventually flatten growth and that WAL
+and shared-memory sizes are transient.
+
+The Future and Workings sections show forecast confidence and the corresponding
+SOC protected for consumption until the next free-import period. These remain
+shadow calculations and do not expose a write control.
 
 When `auth_token_file` is configured, bearer authentication applies to the
 versioned API, service root, event stream and Prometheus metrics. Static UI

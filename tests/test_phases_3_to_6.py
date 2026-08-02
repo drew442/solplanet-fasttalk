@@ -37,6 +37,7 @@ from solplanet_fasttalk.optimisation import (
     OptimisationWorker,
     PlanStore,
     _planning_bucket_ids,
+    forecast_confidence,
     simulate_plan,
 )
 from solplanet_fasttalk.plugins import PluginRegistry
@@ -844,6 +845,151 @@ class Phase6Tests(unittest.TestCase):
                 recommendation["expected_soc_percent"],
             )
             self.assertTrue(recommendation["explanation"])
+
+    def test_forecast_confidence_scales_with_independent_evidence(self):
+        load = {
+            "days": 2,
+            "required_samples_per_horizon": 300,
+            "by_horizon": {
+                name: {
+                    "samples": 30,
+                    "weighted_absolute_percentage_error": 0.6,
+                    "prediction_interval_coverage": 0.3,
+                }
+                for name in (
+                    "0_to_2_hours",
+                    "2_to_8_hours",
+                    "8_to_24_hours",
+                )
+            },
+        }
+        pv = {
+            "days": 2,
+            "required_samples_per_scored_horizon": 300,
+            "maximum_normalized_mae": 0.15,
+            "maximum_normalized_bias": 0.08,
+            "by_horizon": {
+                name: {
+                    "samples": 300,
+                    "normalized_mae": 0.07,
+                    "normalized_bias": -0.03,
+                }
+                for name in (
+                    "0_to_2_hours",
+                    "2_to_8_hours",
+                    "8_to_24_hours",
+                )
+            },
+        }
+        early = forecast_confidence(load, pv, full_days=84)
+        self.assertLess(early["score"], 0.1)
+        mature_load = {
+            **load,
+            "days": 84,
+            "by_horizon": {
+                name: {
+                    "samples": 1000,
+                    "weighted_absolute_percentage_error": 0.1,
+                    "prediction_interval_coverage": 0.8,
+                }
+                for name in load["by_horizon"]
+            },
+        }
+        mature_pv = {
+            **pv,
+            "days": 84,
+            "by_horizon": {
+                name: {
+                    "samples": 1000,
+                    "normalized_mae": 0.0,
+                    "normalized_bias": 0.0,
+                }
+                for name in pv["by_horizon"]
+            },
+        }
+        mature = forecast_confidence(mature_load, mature_pv, full_days=84)
+        self.assertEqual(mature["score"], 1.0)
+        self.assertEqual(mature["status"], "mature")
+
+    def test_effective_forecast_reserve_limits_export_but_not_native_baseline(self):
+        timezone = ZoneInfo("Australia/Sydney")
+        result = simulate_plan(
+            OptimisationConfig(
+                enabled=True,
+                battery_capacity_kwh=10,
+                reserve_soc_percent=10,
+                maximum_soc_percent=90,
+                max_charge_watts=3000,
+                max_discharge_watts=3000,
+            ),
+            ZeroHeroTariff(TariffConfig()),
+            [
+                ForecastSlot(
+                    dt.datetime(2026, 6, 1, 18, 0, tzinfo=timezone),
+                    0,
+                    0,
+                ),
+                ForecastSlot(
+                    dt.datetime(2026, 6, 2, 11, 0, tzinfo=timezone),
+                    0,
+                    0,
+                ),
+            ],
+            initial_soc_percent=90,
+            charge_limit_w=3000,
+            discharge_limit_w=3000,
+            effective_reserve_soc_percent=85,
+        )
+        self.assertEqual(
+            result["control_strategy"]["effective_export_reserve_soc_percent"],
+            85,
+        )
+        exports = [
+            item
+            for item in result["recommendations"]
+            if item["action"] == "export_discharge"
+        ]
+        self.assertTrue(
+            all(item["expected_soc_percent"] >= 85 for item in exports)
+        )
+        self.assertEqual(
+            result["simulation"]["baseline"]["policy"]["minimum_soc_percent"],
+            0,
+        )
+
+    def test_export_buffer_remains_available_to_self_consumption(self):
+        timezone = ZoneInfo("Australia/Sydney")
+        result = simulate_plan(
+            OptimisationConfig(
+                enabled=True,
+                battery_capacity_kwh=10,
+                reserve_soc_percent=10,
+                maximum_soc_percent=90,
+                max_charge_watts=3000,
+                max_discharge_watts=3000,
+            ),
+            ZeroHeroTariff(TariffConfig()),
+            [
+                ForecastSlot(
+                    dt.datetime(2026, 6, 1, 21, 0, tzinfo=timezone),
+                    3000,
+                    0,
+                )
+            ],
+            initial_soc_percent=85,
+            charge_limit_w=3000,
+            discharge_limit_w=3000,
+            effective_reserve_soc_percent=85,
+            native_baseline=NativeBaseline(
+                mode="custom_self_consumption",
+                minimum_soc_percent=10,
+                maximum_soc_percent=90,
+            ),
+        )
+        recommendation = result["recommendations"][0]
+        self.assertEqual(recommendation["expected_grid_power_w"], 0)
+        self.assertLess(recommendation["expected_soc_percent"], 85)
+        self.assertEqual(recommendation["action"], "preserve_native")
 
     def test_stale_required_input_produces_no_action(self):
         config = OptimisationConfig(enabled=True)

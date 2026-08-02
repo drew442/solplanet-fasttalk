@@ -118,6 +118,12 @@ step_minutes = 15
 # Three parallel seven-module Ai-HB G2 stacks, 2.56 kWh per module.
 battery_capacity_kwh = 53.76
 reserve_soc_percent = 15
+# With little scored forecast history, shadow export preserves this much SOC.
+# It scales continuously down toward reserve_soc_percent as 8–24 hour load/PV
+# accuracy and independent-day coverage improve. It never changes native ASW
+# settings and is clamped to maximum_soc_percent for simulation.
+untrusted_reserve_soc_percent = 85
+forecast_confidence_full_days = 84
 maximum_soc_percent = 95
 max_charge_watts = 12000
 max_discharge_watts = 12000

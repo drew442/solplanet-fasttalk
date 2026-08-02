@@ -70,6 +70,36 @@ class DiagnosticsHistoryTests(unittest.TestCase):
                     bucket_seconds=1,
                 )
 
+    def test_storage_status_reports_size_and_observed_growth(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "history.sqlite3")
+            initialize_database(database)
+            now = dt.datetime.now(dt.timezone.utc)
+            with sqlite3.connect(database) as connection:
+                for observed_at, used in (
+                    (now - dt.timedelta(days=1), 100_000),
+                    (now, 200_000),
+                ):
+                    connection.execute(
+                        """
+                        INSERT INTO storage_observations (
+                            observed_at, database_bytes, wal_bytes, shm_bytes,
+                            total_bytes, allocated_bytes, used_bytes
+                        ) VALUES (?, 100000, 0, 0, 100000, 200000, ?)
+                        """,
+                        (observed_at.isoformat(), used),
+                    )
+                connection.commit()
+            status = HistoryReader(database).storage_status()
+
+        self.assertGreater(status["current"]["total_bytes"], 0)
+        self.assertEqual(status["growth"]["method"], "observed_logical_growth")
+        self.assertEqual(status["growth"]["bytes_per_day"], 100_000)
+        self.assertGreater(
+            status["growth"]["projected_total_bytes_365_days"],
+            status["current"]["total_bytes"],
+        )
+
 
 class DiagnosticsSecurityTests(unittest.TestCase):
     def _config(self, directory: str, api: str) -> Path:
@@ -165,6 +195,7 @@ enabled = false
                     payload = json.load(response)
                 self.assertEqual(payload["devices"], [])
                 self.assertIsNone(payload["plan"])
+                self.assertGreater(payload["storage"]["current"]["total_bytes"], 0)
             finally:
                 api.close()
                 thread.join(2)
@@ -195,6 +226,15 @@ class DiagnosticsAssetTests(unittest.TestCase):
         self.assertIn('event.pointerType !== "touch"', javascript)
         self.assertIn("activeChartInteraction", javascript)
         self.assertNotIn(".chart-wrap--small {\n  height: 130px", css)
+
+    def test_dashboard_exposes_storage_size_and_forecast_buffer(self):
+        package = resources.files("solplanet_fasttalk.webui")
+        html = package.joinpath("index.html").read_text(encoding="utf-8")
+        javascript = package.joinpath("app.js").read_text(encoding="utf-8")
+        self.assertIn('id="storageCurrent"', html)
+        self.assertIn('id="storageDailyGrowth"', html)
+        self.assertIn('id="forecastConfidence"', html)
+        self.assertIn("effective_reserve_soc_percent", javascript)
 
 
 if __name__ == "__main__":

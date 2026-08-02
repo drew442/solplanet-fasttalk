@@ -133,6 +133,8 @@ The constraints include:
 - the ASW12kH-T3 manufacturer battery charge/discharge rating of 12 kW;
 - configured inverter charge/discharge power limits;
 - usable capacity, reserve SOC and maximum SOC;
+- a confidence-scaled export reserve between the configured untrusted and
+  mature reserve levels, without changing the native baseline;
 - charge and discharge efficiency; and
 - configured site import/export boundaries.
 

@@ -1084,6 +1084,10 @@ th {
   grid-template-columns: repeat(3, 1fr);
 }
 
+.storage-numbers {
+  grid-template-columns: repeat(4, 1fr);
+}
+
 .tariff-numbers {
   grid-template-columns: repeat(2, 1fr);
 }
@@ -1278,6 +1282,10 @@ dialog input:focus {
   }
 
   .device-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .storage-numbers {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

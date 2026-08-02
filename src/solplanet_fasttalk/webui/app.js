@@ -93,6 +93,19 @@ function formatAge(seconds) {
   return `${(numeric / 86400).toFixed(1)}d`;
 }
 
+function formatBytes(value) {
+  const bytes = number(value);
+  if (bytes === null) return "—";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let scaled = Math.max(0, bytes);
+  let index = 0;
+  while (scaled >= 1024 && index < units.length - 1) {
+    scaled /= 1024;
+    index += 1;
+  }
+  return `${scaled.toFixed(index === 0 ? 0 : scaled < 10 ? 2 : 1)} ${units[index]}`;
+}
+
 function formatTime(timestamp, includeDate = false) {
   if (!timestamp) return "—";
   const value = new Date(timestamp);
@@ -338,6 +351,29 @@ function renderHealth() {
   setText("systemSummary", detail || "No measurements");
 }
 
+function renderStorage() {
+  const storage = state.snapshot?.storage || {};
+  const current = storage.current || {};
+  const growth = storage.growth || {};
+  setText("storageCurrent", formatBytes(current.total_bytes));
+  setText(
+    "storageDailyGrowth",
+    growth.bytes_per_day === null || growth.bytes_per_day === undefined
+      ? "Learning"
+      : `${formatBytes(growth.bytes_per_day)} / day`,
+  );
+  setText("storageProjected30", formatBytes(growth.projected_total_bytes_30_days));
+  setText("storageProjected365", formatBytes(growth.projected_total_bytes_365_days));
+  setText(
+    "storageProjectionQuality",
+    `${title(growth.confidence || "unavailable")} · ${title(growth.method || "insufficient_history")}`,
+  );
+  setText(
+    "storageProjectionNote",
+    growth.note || "Growth projection will appear after storage observations accumulate.",
+  );
+}
+
 function renderWorkings() {
   const plan = state.snapshot?.plan || {};
   const forecast = state.snapshot?.forecast || {};
@@ -360,10 +396,11 @@ function renderWorkings() {
   const current = currentRecommendation(plan);
   const constraints = current?.constraints || {};
   const nativeSchedule = plan.native_schedule_quality || {};
+  const confidence = plan.forecast_confidence || {};
   setText(
     "constraintStep",
     current
-      ? `Trajectory SOC ${formatPercent(constraints.trajectory_minimum_soc_percent ?? constraints.reserve_soc_percent)}–${formatPercent(constraints.trajectory_maximum_soc_percent ?? constraints.maximum_soc_percent)}; charge ${formatPower(constraints.charge_limit_w)}, discharge ${formatPower(constraints.discharge_limit_w)}. Native schedule: ${nativeSchedule.confirmed ? `${nativeSchedule.configured_windows || 0} confirmed window(s)` : "unconfirmed"}${nativeSchedule.active_window_readback_matches === true ? "; active window matches ASW readback" : ""}.`
+      ? `Trajectory SOC ${formatPercent(constraints.trajectory_minimum_soc_percent ?? constraints.reserve_soc_percent)}–${formatPercent(constraints.trajectory_maximum_soc_percent ?? constraints.maximum_soc_percent)}; forecast confidence ${formatPercent(confidence.score, true)} protects ${formatPercent(confidence.effective_reserve_soc_percent ?? constraints.effective_reserve_soc_percent)} SOC for consumption before free energy. Charge ${formatPower(constraints.charge_limit_w)}, discharge ${formatPower(constraints.discharge_limit_w)}. Native schedule: ${nativeSchedule.confirmed ? `${nativeSchedule.configured_windows || 0} confirmed window(s)` : "unconfirmed"}${nativeSchedule.active_window_readback_matches === true ? "; active window matches ASW readback" : ""}.`
       : "BMS, SOC and configured site boundaries are checked before every recommendation.",
   );
   setText(
@@ -587,6 +624,13 @@ function renderSchedule() {
     retainedLoad
       ? `${retainedLoad.points} retained 15-minute load points`
       : "15-minute training history starts after the next maintenance pass",
+  );
+  const confidence = state.snapshot?.plan?.forecast_confidence;
+  setText(
+    "forecastConfidence",
+    confidence
+      ? `${formatPercent(confidence.score, true)} · ${formatPercent(confidence.effective_reserve_soc_percent)} SOC protected`
+      : "High buffer — confidence not scored",
   );
 
   const tariffPoints = state.historical.tariff || [];
@@ -941,8 +985,8 @@ async function loadHistory() {
     api(`/forecasts/pv?${common}`).catch(() => ({ historical_comparison: [] })),
     api(`/plans/history?${common}`),
     api("/tariffs/forecast?hours=48&step_minutes=15").catch(() => ({ points: [] })),
-    api(`/predictions/quality?signal=site.load_power&scenario=expected&since=${encodeURIComponent(since)}`).catch(() => null),
-    api(`/predictions/quality?signal=battery.soc&scenario=native_no_change&since=${encodeURIComponent(since)}`).catch(() => null),
+    api(`/predictions/quality?signal=site.load_power&scenario=expected&model=fasttalk-load&model_version=hierarchical-quarter-hour-v3&since=${encodeURIComponent(since)}`).catch(() => null),
+    api(`/predictions/quality?signal=battery.soc&scenario=native_no_change&model=fasttalk-dispatch-simulator&model_version=asw-custom-mode-v3&since=${encodeURIComponent(since)}`).catch(() => null),
     state.historical.trainingCoverage
       ? Promise.resolve(state.historical.trainingCoverage)
       : api("/training/coverage").catch(() => null),
@@ -1084,6 +1128,7 @@ function renderAll() {
   renderCurrent();
   renderRecommendation();
   renderHealth();
+  renderStorage();
   renderWorkings();
   renderForecastAndTariff();
   renderWeather();

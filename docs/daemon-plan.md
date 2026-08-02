@@ -288,6 +288,9 @@ Deliver:
 - ASW Custom mode without a window as the normal load-following state, with
   fixed-power windows only for grid charging or export discharge;
 - battery SOC, charge/discharge limits, reserve and efficiency constraints;
+- confidence-scaled shadow SOC reserve, initially prioritising a cost-neutral
+  day and progressively releasing more export energy as independently scored
+  8–24-hour forecast confidence improves;
 - versioned site-consumption and battery-SOC forecasts with uncertainty,
   native/no-change and shadow-counterfactual scenarios;
 - long-lived 15-minute training rollups and causal weather/tariff/constraint
@@ -295,6 +298,8 @@ Deliver:
 - site import/export constraints;
 - recommendation schedule with a human-readable explanation; and
 - replay/simulation against historical data without sending commands.
+- diagnostics for current database size, observed growth and bounded-retention
+  projections.
 
 Acceptance:
 

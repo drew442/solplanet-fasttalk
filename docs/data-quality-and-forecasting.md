@@ -220,6 +220,33 @@ is therefore an explicit disclosure to that provider. Disabling the weather
 worker removes the Open-Meteo disclosure without affecting local measurement
 collection; cached weather contains only timestamps and forecast values.
 
+## Confidence-scaled export reserve
+
+Forecast maturity is no longer treated as an all-or-nothing waiting period.
+The shadow planner calculates an inspectable confidence score from independent
+day diversity, sample coverage in each lead-time band, 8–24-hour load error,
+load interval calibration, and PV error/bias. The weaker of load and PV
+confidence controls the result.
+
+At zero confidence, daemon-proposed export discharge preserves the configured
+`untrusted_reserve_soc_percent` (85% by default). As evidence improves, the
+effective reserve continuously falls toward `reserve_soc_percent`. This
+reserve applies only to the proposed shadow trajectory: it neither changes the
+owner's native inverter configuration nor changes the no-daemon baseline.
+
+The initial economic stage is cost-neutral-first. Under the archived tariff,
+earning the daily ZEROHERO credit leaves $0.65 of the $1.65 supply charge to
+cover, equivalent to about 4.33 kWh at the 15-cent premium export rate before
+any import cost. The optimiser may release only the energy permitted by the
+confidence-scaled reserve. Increasing confidence therefore creates a gradual
+path from covering fixed daily cost toward profit rather than a sudden control
+threshold.
+
+`forecast_confidence_full_days` defaults to 84. Repeated forecast vintages do
+not substitute for independent days, and accuracy evidence still affects the
+score throughout this period. The plan exposes the component scores, effective
+reserve, economic stage and cost-neutral reference calculation.
+
 ## Required shadow validation before writes are considered
 
 Keep the daemon read-only until at least:

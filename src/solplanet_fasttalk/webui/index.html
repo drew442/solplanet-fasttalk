@@ -290,6 +290,7 @@
         <div><span>Load forecast accuracy</span><strong id="loadForecastQuality">Learning</strong></div>
         <div><span>Native SOC forecast accuracy</span><strong id="socForecastQuality">Learning</strong></div>
         <div><span>Training history</span><strong id="trainingCoverage">Collecting</strong></div>
+        <div><span>Export confidence / protected SOC</span><strong id="forecastConfidence">High buffer</strong></div>
       </div>
 
       <div class="schedule-head">
@@ -400,6 +401,17 @@
         </div>
         <span id="systemSummary" class="quiet">—</span>
       </div>
+      <div class="schedule-head">
+        <div><p class="eyebrow">DATA STORAGE</p><h3>History size and growth</h3></div>
+        <span id="storageProjectionQuality" class="quiet">Learning growth rate</span>
+      </div>
+      <div class="accuracy-numbers storage-numbers">
+        <div><span>Current on disk</span><strong id="storageCurrent">—</strong></div>
+        <div><span>Recent growth</span><strong id="storageDailyGrowth">—</strong></div>
+        <div><span>Projected in 30 days</span><strong id="storageProjected30">—</strong></div>
+        <div><span>Projected in one year</span><strong id="storageProjected365">—</strong></div>
+      </div>
+      <p id="storageProjectionNote" class="panel-intro">Waiting for database statistics.</p>
       <div id="deviceGrid" class="device-grid"></div>
       <div class="events-head"><h3>Recent events</h3><span class="quiet">Newest first</span></div>
       <div id="eventList" class="event-list"></div>

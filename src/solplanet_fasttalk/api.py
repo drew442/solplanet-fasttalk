@@ -66,7 +66,7 @@ class API:
         api = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "solplanet-fasttalk/0.7.4"
+            server_version = "solplanet-fasttalk/0.8.0"
 
             def do_GET(self) -> None:
                 parsed = urlparse(self.path)
@@ -249,12 +249,16 @@ class API:
                             api.history.prediction_quality(
                                 signal=signal,
                                 scenario=scenario,
+                                model=self._one(query, "model"),
+                                model_version=self._one(query, "model_version"),
                                 since=self._one(query, "since"),
                                 until=self._one(query, "until"),
                             )
                         )
                     elif parsed.path == "/v1/training/coverage":
                         self._json(api.history.training_coverage())
+                    elif parsed.path == "/v1/storage":
+                        self._json(api.history.storage_status())
                     elif parsed.path == "/v1/plans/current" and api.plans:
                         self._json(api.plans.snapshot())
                     elif parsed.path == "/v1/plans/history":
@@ -594,5 +598,6 @@ class API:
             "plan": self.plans.snapshot() if self.plans else None,
             "plan_history": self.history.plans(limit=12),
             "financials": financials,
+            "storage": self.history.storage_status(),
             "events": self.history.events(20),
         }

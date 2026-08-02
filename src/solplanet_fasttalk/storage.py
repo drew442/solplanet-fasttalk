@@ -149,6 +149,17 @@ CREATE TABLE IF NOT EXISTS plan_history (
 );
 CREATE INDEX IF NOT EXISTS plan_history_time
     ON plan_history(generated_at);
+CREATE TABLE IF NOT EXISTS storage_observations (
+    observed_at TEXT PRIMARY KEY,
+    database_bytes INTEGER NOT NULL,
+    wal_bytes INTEGER NOT NULL,
+    shm_bytes INTEGER NOT NULL,
+    total_bytes INTEGER NOT NULL,
+    allocated_bytes INTEGER NOT NULL,
+    used_bytes INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS storage_observations_time
+    ON storage_observations(observed_at);
 """
 
 
@@ -280,6 +291,9 @@ class HistoryWriter:
 class HistoryReader:
     def __init__(self, path: str) -> None:
         self.path = path
+        self._storage_cache: dict[str, Any] | None = None
+        self._storage_cache_at = 0.0
+        self._storage_cache_lock = threading.RLock()
 
     def measurements(
         self,
@@ -671,6 +685,8 @@ class HistoryReader:
         *,
         signal: str,
         scenario: str,
+        model: str | None = None,
+        model_version: str | None = None,
         since: str | None = None,
         until: str | None = None,
         limit: int = 50000,
@@ -679,6 +695,12 @@ class HistoryReader:
 
         clauses = ["signal = ?", "scenario = ?"]
         values: list[Any] = [signal, scenario]
+        if model:
+            clauses.append("model = ?")
+            values.append(model)
+        if model_version:
+            clauses.append("model_version = ?")
+            values.append(model_version)
         if since:
             clauses.append("prediction_at >= ?")
             values.append(since)
@@ -859,11 +881,134 @@ class HistoryReader:
             "location_included": False,
         }
 
+    def storage_status(self) -> dict[str, Any]:
+        """Report physical size and a bounded, explicitly qualified projection."""
+
+        with self._storage_cache_lock:
+            if (
+                self._storage_cache is not None
+                and time.monotonic() - self._storage_cache_at < 60
+            ):
+                return self._storage_cache
+
+        database = Path(self.path)
+
+        def file_size(path: Path) -> int:
+            try:
+                return path.stat().st_size
+            except FileNotFoundError:
+                return 0
+
+        database_bytes = file_size(database)
+        wal_bytes = file_size(Path(f"{self.path}-wal"))
+        shm_bytes = file_size(Path(f"{self.path}-shm"))
+        total_bytes = database_bytes + wal_bytes + shm_bytes
+        now = dt.datetime.now(dt.timezone.utc)
+        with sqlite3.connect(self.path) as connection:
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+            page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+            free_pages = int(
+                connection.execute("PRAGMA freelist_count").fetchone()[0]
+            )
+            observations = connection.execute(
+                """
+                SELECT observed_at, used_bytes
+                FROM storage_observations
+                WHERE julianday(observed_at) >= julianday('now', '-30 days')
+                ORDER BY observed_at
+                """
+            ).fetchall()
+            earliest = connection.execute(
+                """
+                SELECT MIN(timestamp) FROM (
+                    SELECT MIN(observed_at) AS timestamp FROM measurements
+                    UNION ALL SELECT MIN(period_start) FROM measurement_rollups
+                    UNION ALL SELECT MIN(issued_at) FROM forecast_points
+                    UNION ALL SELECT MIN(issued_at) FROM forecast_context_points
+                    UNION ALL SELECT MIN(issued_at) FROM prediction_points
+                    UNION ALL SELECT MIN(period_start) FROM financial_intervals
+                    UNION ALL SELECT MIN(generated_at) FROM plan_history
+                )
+                """
+            ).fetchone()[0]
+
+        allocated_bytes = page_count * page_size
+        used_bytes = max(0, page_count - free_pages) * page_size
+        daily_growth: float | None = None
+        projection_method = "insufficient_history"
+        projection_confidence = "unavailable"
+        observation_span_hours = 0.0
+        if len(observations) >= 2:
+            first_time = dt_from_iso(observations[0][0])
+            last_time = dt_from_iso(observations[-1][0])
+            observation_span_hours = max(
+                0.0,
+                (last_time - first_time).total_seconds() / 3600.0,
+            )
+            if observation_span_hours >= 6:
+                change = float(observations[-1][1]) - float(observations[0][1])
+                daily_growth = max(0.0, change / observation_span_hours * 24.0)
+                projection_method = "observed_logical_growth"
+                projection_confidence = (
+                    "established" if observation_span_hours >= 168 else "preliminary"
+                )
+        if daily_growth is None and earliest:
+            age_days = max(
+                1.0,
+                (now - dt_from_iso(earliest)).total_seconds() / 86400.0,
+            )
+            # Remove a small fixed-schema allowance so a new empty database
+            # does not dominate the early rate. This estimate is replaced by
+            # observed logical growth after six hours of maintenance samples.
+            daily_growth = max(0.0, used_bytes - 65536) / age_days
+            projection_method = "database_age_estimate"
+            projection_confidence = "rough"
+
+        def projected(days: int) -> int | None:
+            return (
+                round(total_bytes + daily_growth * days)
+                if daily_growth is not None
+                else None
+            )
+
+        result = {
+            "measured_at": now.isoformat(),
+            "current": {
+                "database_bytes": database_bytes,
+                "wal_bytes": wal_bytes,
+                "shm_bytes": shm_bytes,
+                "total_bytes": total_bytes,
+                "allocated_database_bytes": allocated_bytes,
+                "used_database_bytes": used_bytes,
+            },
+            "growth": {
+                "bytes_per_day": (
+                    round(daily_growth) if daily_growth is not None else None
+                ),
+                "projected_total_bytes_30_days": projected(30),
+                "projected_total_bytes_365_days": projected(365),
+                "method": projection_method,
+                "confidence": projection_confidence,
+                "observation_span_hours": round(observation_span_hours, 2),
+                "note": (
+                    "Linear projection at the recent logical database growth rate; "
+                    "actual long-term growth will flatten as configured retention "
+                    "boundaries begin pruning data. WAL and SHM sizes are transient."
+                ),
+            },
+        }
+        with self._storage_cache_lock:
+            self._storage_cache = result
+            self._storage_cache_at = time.monotonic()
+        return result
+
     def prediction_quality(
         self,
         *,
         signal: str,
         scenario: str,
+        model: str | None = None,
+        model_version: str | None = None,
         since: str | None = None,
         until: str | None = None,
         limit: int = 100000,
@@ -885,6 +1030,8 @@ class HistoryReader:
         samples = self.prediction_samples(
             signal=signal,
             scenario=scenario,
+            model=model,
+            model_version=model_version,
             since=since,
             until=until,
             limit=limit,
@@ -967,6 +1114,8 @@ class HistoryReader:
         return {
             "signal": signal,
             "scenario": scenario,
+            "model": model,
+            "model_version": model_version,
             "scoreable": True,
             "unit": samples[0]["unit"] if samples else None,
             "samples": len(samples),
@@ -1728,6 +1877,46 @@ class StorageMaintainer:
                 (
                     f"-{self.config.forecast_context_retention_days} days",
                 ),
+            )
+            connection.commit()
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+            page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+            free_pages = int(
+                connection.execute("PRAGMA freelist_count").fetchone()[0]
+            )
+
+            def file_size(path: Path) -> int:
+                try:
+                    return path.stat().st_size
+                except FileNotFoundError:
+                    return 0
+
+            database = Path(self.path)
+            database_bytes = file_size(database)
+            wal_bytes = file_size(Path(f"{self.path}-wal"))
+            shm_bytes = file_size(Path(f"{self.path}-shm"))
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO storage_observations (
+                    observed_at, database_bytes, wal_bytes, shm_bytes,
+                    total_bytes, allocated_bytes, used_bytes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now.isoformat(),
+                    database_bytes,
+                    wal_bytes,
+                    shm_bytes,
+                    database_bytes + wal_bytes + shm_bytes,
+                    page_count * page_size,
+                    max(0, page_count - free_pages) * page_size,
+                ),
+            )
+            connection.execute(
+                """
+                DELETE FROM storage_observations
+                WHERE julianday(observed_at) < julianday('now', '-90 days')
+                """
             )
             connection.commit()
         self.runs += 1

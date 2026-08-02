@@ -121,6 +121,133 @@ def _quantile(values: list[float], probability: float) -> float:
     return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
 
 
+def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
+    return max(lower, min(upper, value))
+
+
+def forecast_confidence(
+    load_quality: dict[str, Any],
+    pv_validation: dict[str, Any],
+    *,
+    full_days: int,
+) -> dict[str, Any]:
+    """Score independent evidence for the export-to-next-free-window horizon.
+
+    This is deliberately conservative and inspectable. Repeated forecast
+    vintages cannot substitute for independent days, and strong point-error
+    metrics cannot substitute for a calibrated load interval.
+    """
+
+    required_horizons = ("0_to_2_hours", "2_to_8_hours", "8_to_24_hours")
+
+    def evidence(summary: dict[str, Any], required_samples: int) -> dict[str, float]:
+        days = max(0, int(summary.get("days") or 0))
+        day_score = math.sqrt(_clamp(days / max(1, full_days)))
+        by_horizon = summary.get("by_horizon") or {}
+        sample_score = min(
+            (
+                _clamp(
+                    float((by_horizon.get(name) or {}).get("samples") or 0)
+                    / max(1, required_samples)
+                )
+                for name in required_horizons
+            ),
+            default=0.0,
+        )
+        return {
+            "independent_days": days,
+            "day_diversity_score": day_score,
+            "horizon_sample_score": sample_score,
+            "evidence_score": min(day_score, sample_score),
+        }
+
+    load_evidence = evidence(
+        load_quality,
+        int(load_quality.get("required_samples_per_horizon") or 300),
+    )
+    load_horizon = (load_quality.get("by_horizon") or {}).get(
+        "8_to_24_hours",
+        {},
+    )
+    load_wape = load_horizon.get("weighted_absolute_percentage_error")
+    load_coverage = load_horizon.get("prediction_interval_coverage")
+    load_error_score = (
+        _clamp((1.0 - float(load_wape)) / 0.8)
+        if load_wape is not None
+        else 0.0
+    )
+    load_interval_score = (
+        _clamp(float(load_coverage) / 0.8)
+        if load_coverage is not None
+        else 0.0
+    )
+    load_accuracy_score = min(load_error_score, load_interval_score)
+    load_score = load_evidence["evidence_score"] * load_accuracy_score
+
+    pv_required_samples = int(
+        pv_validation.get("required_samples_per_scored_horizon") or 300
+    )
+    pv_evidence = evidence(pv_validation, pv_required_samples)
+    pv_horizons = pv_validation.get("by_horizon") or {}
+    maximum_mae = float(pv_validation.get("maximum_normalized_mae") or 0.15)
+    maximum_bias = float(pv_validation.get("maximum_normalized_bias") or 0.08)
+    pv_accuracy_scores: list[float] = []
+    for name in required_horizons:
+        metrics = pv_horizons.get(name) or {}
+        normalized_mae = metrics.get("normalized_mae")
+        normalized_bias = metrics.get("normalized_bias")
+        if normalized_mae is None:
+            pv_accuracy_scores.append(0.0)
+            continue
+        mae_score = _clamp(1.0 - float(normalized_mae) / maximum_mae)
+        bias_score = (
+            _clamp(1.0 - abs(float(normalized_bias)) / maximum_bias)
+            if normalized_bias is not None
+            else mae_score
+        )
+        pv_accuracy_scores.append(min(mae_score, bias_score))
+    pv_accuracy_score = min(pv_accuracy_scores, default=0.0)
+    pv_score = pv_evidence["evidence_score"] * pv_accuracy_score
+    combined = min(load_score, pv_score)
+
+    def rounded_evidence(value: dict[str, float]) -> dict[str, float]:
+        return {
+            key: (item if key == "independent_days" else round(item, 5))
+            for key, item in value.items()
+        }
+
+    return {
+        "score": round(combined, 5),
+        "status": (
+            "mature"
+            if combined >= 0.9
+            else "developing"
+            if combined >= 0.5
+            else "learning"
+            if combined >= 0.1
+            else "high_buffer"
+        ),
+        "full_confidence_days": full_days,
+        "decision_horizon": "export window through next free-import period",
+        "load": {
+            **rounded_evidence(load_evidence),
+            "accuracy_score": round(load_accuracy_score, 5),
+            "score": round(load_score, 5),
+            "eight_to_24_hour_wape": load_wape,
+            "eight_to_24_hour_interval_coverage": load_coverage,
+        },
+        "pv": {
+            **rounded_evidence(pv_evidence),
+            "accuracy_score": round(pv_accuracy_score, 5),
+            "score": round(pv_score, 5),
+        },
+        "method": (
+            "minimum of independently scored load and PV evidence; day diversity, "
+            "lead-time coverage, error and interval calibration all constrain confidence"
+        ),
+    }
+
+
 def _planning_bucket_ids(
     now: dt.datetime,
     cutoff: dt.datetime,
@@ -385,6 +512,7 @@ def simulate_plan(
     native_baseline: NativeBaseline | None = None,
     observed_charge_limit_w: float | None = None,
     observed_discharge_limit_w: float | None = None,
+    effective_reserve_soc_percent: float | None = None,
 ) -> dict[str, Any]:
     """Plan fixed windows around the ASW's native self-consumption behavior."""
 
@@ -400,7 +528,17 @@ def simulate_plan(
     ordered_slots = sorted(slots, key=lambda item: item.timestamp)
     step_hours = config.step_minutes / 60.0
     capacity_wh = config.battery_capacity_kwh * 1000.0
+    planning_reserve_soc_percent = _clamp(
+        (
+            config.reserve_soc_percent
+            if effective_reserve_soc_percent is None
+            else effective_reserve_soc_percent
+        ),
+        config.reserve_soc_percent,
+        config.maximum_soc_percent,
+    )
     minimum_wh = capacity_wh * config.reserve_soc_percent / 100.0
+    export_minimum_wh = capacity_wh * planning_reserve_soc_percent / 100.0
     maximum_wh = capacity_wh * config.maximum_soc_percent / 100.0
     initial_wh = min(
         maximum_wh,
@@ -567,7 +705,7 @@ def simulate_plan(
                 command_power_w=discharge_limit_w,
                 natural_grid_w=natural_grid_w,
                 stored_wh=node.stored_wh,
-                minimum_wh=minimum_wh,
+                minimum_wh=export_minimum_wh,
                 maximum_wh=maximum_wh,
                 charge_limit_w=charge_limit_w,
                 discharge_limit_w=discharge_limit_w,
@@ -725,6 +863,8 @@ def simulate_plan(
         trajectory_minimum_soc = (
             baseline_policy.minimum_soc_percent
             if optimized.action == "preserve_native"
+            else planning_reserve_soc_percent
+            if optimized.action == "export_discharge"
             else config.reserve_soc_percent
         )
         trajectory_maximum_soc = (
@@ -785,6 +925,7 @@ def simulate_plan(
                     "site_import_limit_w": config.site_import_limit_watts,
                     "site_export_limit_w": config.site_export_limit_watts,
                     "reserve_soc_percent": config.reserve_soc_percent,
+                    "effective_reserve_soc_percent": planning_reserve_soc_percent,
                     "maximum_soc_percent": config.maximum_soc_percent,
                     "trajectory_minimum_soc_percent": trajectory_minimum_soc,
                     "trajectory_maximum_soc_percent": trajectory_maximum_soc,
@@ -877,6 +1018,14 @@ def simulate_plan(
                 "minimum": config.reserve_soc_percent,
                 "maximum": config.maximum_soc_percent,
             },
+            "effective_export_reserve_soc_percent": round(
+                planning_reserve_soc_percent,
+                3,
+            ),
+            "reserve_policy": (
+                "confidence-scaled for deliberate export discharge only; "
+                "retained energy remains available to native self-consumption"
+            ),
             "soc_bound_write_required_if_native_differs": True,
         },
         "hardware_limits": {
@@ -1156,6 +1305,91 @@ class OptimisationWorker:
             if active_native_window
             else None
         )
+        load_quality = (
+            self.history.prediction_quality(
+                signal="site.load_power",
+                scenario="expected",
+                model="fasttalk-load",
+                model_version="hierarchical-quarter-hour-v3",
+                since=(now - dt.timedelta(days=90)).isoformat(),
+            )
+            if self.history is not None
+            else {"samples": 0, "days": 0, "by_horizon": {}}
+        )
+        pv_validation = forecast.get("correction", {}).get("validation", {})
+        confidence = forecast_confidence(
+            load_quality,
+            pv_validation,
+            full_days=self.config.forecast_confidence_full_days,
+        )
+        untrusted_reserve = min(
+            self.config.maximum_soc_percent,
+            self.config.untrusted_reserve_soc_percent,
+        )
+        effective_reserve = self.config.reserve_soc_percent + (
+            untrusted_reserve - self.config.reserve_soc_percent
+        ) * (1.0 - float(confidence["score"]))
+        confidence["configured_reserve_soc_percent"] = (
+            self.config.reserve_soc_percent
+        )
+        confidence["untrusted_reserve_soc_percent"] = untrusted_reserve
+        confidence["effective_reserve_soc_percent"] = round(
+            effective_reserve,
+            3,
+        )
+        confidence["objective"] = (
+            "protect consumption until the next free-import period; release "
+            "more Super Export energy as independently scored confidence improves"
+        )
+        confidence["economic_stage"] = (
+            "cost_neutral_first"
+            if confidence["score"] < 0.1
+            else "confidence_scaled_profit"
+        )
+        confidence["profit_release_fraction"] = confidence["score"]
+        local_now = now.astimezone(self.tariff.timezone)
+        premium_quote = self.tariff.quote(
+            local_now.replace(hour=18, minute=0, second=0, microsecond=0)
+        )
+        fixed_cost_after_credit = max(
+            0.0,
+            premium_quote.daily_supply_charge
+            - float(premium_quote.zerohero_daily_credit or 0.0),
+        )
+        cost_neutral_export_kwh = (
+            fixed_cost_after_credit / premium_quote.export_price_per_kwh
+            if premium_quote.export_price_per_kwh > 0
+            else None
+        )
+        confidence["cost_neutral_target"] = {
+            "daily_supply_charge": premium_quote.daily_supply_charge,
+            "zerohero_credit_if_earned": premium_quote.zerohero_daily_credit,
+            "remaining_fixed_cost_after_credit": round(
+                fixed_cost_after_credit,
+                5,
+            ),
+            "premium_export_kwh_if_no_import_cost": (
+                round(cost_neutral_export_kwh, 5)
+                if cost_neutral_export_kwh is not None
+                else None
+            ),
+            "equivalent_battery_soc_percent": (
+                round(
+                    cost_neutral_export_kwh
+                    / self.config.discharge_efficiency
+                    / self.config.battery_capacity_kwh
+                    * 100.0,
+                    3,
+                )
+                if cost_neutral_export_kwh is not None
+                else None
+            ),
+            "note": (
+                "minimum premium export needed to offset the daily supply charge "
+                "after earning ZEROHERO, before any import cost; the optimizer may "
+                "release only what the confidence-scaled reserve permits"
+            ),
+        }
         result = simulate_plan(
             self.config,
             self.tariff,
@@ -1166,23 +1400,12 @@ class OptimisationWorker:
             native_baseline=native_baseline,
             observed_charge_limit_w=observed_charge,
             observed_discharge_limit_w=observed_discharge,
-        )
-        load_quality = (
-            self.history.prediction_quality(
-                signal="site.load_power",
-                scenario="expected",
-                since=(now - dt.timedelta(days=30)).isoformat(),
-            )
-            if self.history is not None
-            else {"samples": 0, "days": 0}
+            effective_reserve_soc_percent=effective_reserve,
         )
         load_profile_ready = bool(slots) and all(
             slot.load_samples >= 4 for slot in slots
         )
-        load_accuracy_ready = bool(
-            load_quality.get("days", 0) >= 14
-            and load_quality.get("samples", 0) >= 300
-        )
+        load_accuracy_ready = bool(load_quality.get("dataset_ready", False))
         pv_control_ready = bool(
             forecast.get("correction", {}).get("control_ready", False)
         )
@@ -1216,7 +1439,7 @@ class OptimisationWorker:
             )
         if not load_accuracy_ready:
             quality_reasons.append(
-                "load prediction accuracy lacks 14 days and 300 scored samples"
+                "load prediction accuracy lacks 28 days and 300 scored samples in each required horizon"
             )
         if missing_daylight_buckets:
             quality_reasons.append(
@@ -1263,6 +1486,7 @@ class OptimisationWorker:
                 "short_term_samples": load_correction_samples,
                 "short_term_decay_hours": 4,
             },
+            "forecast_confidence": confidence,
             "pv_forecast_quality": {
                 "control_ready": pv_control_ready,
                 "learning_state": forecast.get("correction", {}).get(

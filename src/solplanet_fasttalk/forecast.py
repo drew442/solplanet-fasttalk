@@ -357,6 +357,11 @@ class ForecastCorrector:
                 "bias_w": (
                     round(statistics.mean(errors), 3) if errors else None
                 ),
+                "normalized_bias": (
+                    round(statistics.mean(errors) / peak_w, 5)
+                    if errors
+                    else None
+                ),
                 "normalized_mae": (
                     round(
                         statistics.mean(abs(error) for error in errors)
@@ -627,7 +632,7 @@ class ForecastSolarWorker:
             url,
             headers={
                 "Accept": "application/json",
-                "User-Agent": "solplanet-fasttalk/0.7.4",
+                    "User-Agent": "solplanet-fasttalk/0.8.0",
             },
         )
         with urlopen(request, timeout=self.config.request_timeout_seconds) as response:
