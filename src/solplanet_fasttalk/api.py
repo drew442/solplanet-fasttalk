@@ -66,7 +66,7 @@ class API:
         api = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "solplanet-fasttalk/0.6.1"
+            server_version = "solplanet-fasttalk/0.6.2"
 
             def do_GET(self) -> None:
                 parsed = urlparse(self.path)

@@ -192,6 +192,8 @@ class DiagnosticsAssetTests(unittest.TestCase):
         self.assertIn("chart-tooltip", css)
         self.assertIn('addEventListener("pointermove"', javascript)
         self.assertIn("nearestChartPoint", javascript)
+        self.assertIn('event.pointerType !== "touch"', javascript)
+        self.assertIn("activeChartInteraction", javascript)
         self.assertNotIn(".chart-wrap--small {\n  height: 130px", css)
 
 

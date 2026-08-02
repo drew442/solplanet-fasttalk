@@ -15,8 +15,10 @@ the mouse anywhere over a graph, or touch it on a phone, to snap a crosshair to
 the nearest recorded or forecast sample. The readout shows that sample's local
 timestamp and the actual value for every metric on the graph. If series have
 different sampling intervals, the readout identifies a metric whose nearest
-sample has a different timestamp. The left and right arrow keys move the
-crosshair between samples when a graph has keyboard focus.
+sample has a different timestamp. On a touch screen the readout remains open
+after a tap; tap another point to move it or tap outside the graph to close it.
+The left and right arrow keys move the crosshair between samples when a graph
+has keyboard focus, and Escape closes it.
 
 ## Information shown
 

@@ -31,6 +31,7 @@ const ranges = {
 
 const chartDefinitions = new Map();
 let chartResizeTimer = null;
+let activeChartInteraction = null;
 
 const powerSeries = [
   ["site.load_power", "Consumption", "#b86242"],
@@ -665,6 +666,7 @@ function chartTooltip(svg) {
 function renderChart(id, series, options = {}) {
   const svg = $(id);
   const priorSelection = Number(svg.dataset.chartSelectedInstant);
+  if (activeChartInteraction?.svg === svg) activeChartInteraction = null;
   chartDefinitions.set(id, { series, options });
   svg.replaceChildren();
   svg.removeAttribute("tabindex");
@@ -774,7 +776,15 @@ function renderChart(id, series, options = {}) {
   svg.setAttribute("tabindex", "0");
 
   let selectedIndex = 0;
+  const hideTooltip = () => {
+    delete svg.dataset.chartSelectedInstant;
+    tooltip.hidden = true;
+    interaction.setAttribute("visibility", "hidden");
+    if (activeChartInteraction?.svg === svg) activeChartInteraction = null;
+  };
   const showTooltip = (instant, clientX = null, clientY = null) => {
+    if (activeChartInteraction?.svg !== svg) activeChartInteraction?.hide();
+    activeChartInteraction = { svg, hide: hideTooltip };
     const selected = nearestChartPoint(
       instantPoints,
       instant,
@@ -828,12 +838,14 @@ function renderChart(id, series, options = {}) {
   };
   hitArea.addEventListener("pointermove", showFromPointer);
   hitArea.addEventListener("pointerdown", showFromPointer);
-  hitArea.addEventListener("pointerleave", () => {
-    delete svg.dataset.chartSelectedInstant;
-    tooltip.hidden = true;
-    interaction.setAttribute("visibility", "hidden");
+  hitArea.addEventListener("pointerleave", (event) => {
+    if (event.pointerType !== "touch") hideTooltip();
   });
   svg.onkeydown = (event) => {
+    if (event.key === "Escape") {
+      hideTooltip();
+      return;
+    }
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     selectedIndex = Math.max(0, Math.min(
@@ -1092,6 +1104,10 @@ async function beginDataPolling(pollSeconds = 5) {
 }
 
 function wireInteractions() {
+  document.addEventListener("pointerdown", (event) => {
+    const active = activeChartInteraction;
+    if (active && !active.svg.parentElement.contains(event.target)) active.hide();
+  });
   window.addEventListener("resize", () => {
     window.clearTimeout(chartResizeTimer);
     chartResizeTimer = window.setTimeout(() => {
