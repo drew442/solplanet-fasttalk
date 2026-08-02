@@ -957,6 +957,44 @@ class Phase6Tests(unittest.TestCase):
         self.assertEqual(recommendations[1]["baseline_grid_power_w"], 0)
         self.assertEqual(recommendations[2]["baseline_battery_power_w"], -12000)
 
+    def test_confirmed_schedule_overrides_effective_self_consumption_readback(self):
+        schedule = (
+            NativeScheduleWindow("charge", "09:00", "12:00", 12000),
+        )
+        forecast_config = ForecastSolarConfig(
+            enabled=True,
+            planes=(ForecastPlane("array", 25, 0, 10),),
+        )
+        worker = OptimisationWorker(
+            OptimisationConfig(
+                enabled=True,
+                native_schedule_confirmed=True,
+                native_schedule=schedule,
+            ),
+            PlantState(),
+            ForecastStore(forecast_config, "Australia/Sydney"),
+            ZeroHeroTariff(TariffConfig()),
+            PlanStore(),
+        )
+        baseline = worker._native_baseline(
+            {
+                "asw.control.run_mode": {
+                    "value": 2,
+                    "quality": "good",
+                },
+                "battery.limit.soc_lower": {
+                    "value": 10,
+                    "quality": "good",
+                },
+                "battery.limit.soc_upper": {
+                    "value": 100,
+                    "quality": "good",
+                },
+            }
+        )
+        self.assertEqual(baseline.mode, "custom_self_consumption")
+        self.assertEqual(baseline.schedule, schedule)
+
     def test_fixed_discharge_window_does_not_add_site_load(self):
         tariff = ZeroHeroTariff(TariffConfig())
         config = OptimisationConfig(

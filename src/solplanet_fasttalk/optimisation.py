@@ -1477,11 +1477,14 @@ class OptimisationWorker:
             and isinstance(value["value"], (int, float))
         )
         mode_value = int(run_mode["value"]) if fresh(run_mode) else 4
-        mode = {
-            2: "self_consumption",
-            3: "reserve",
-            4: "custom_self_consumption",
-        }.get(mode_value, "unknown")
+        if self.config.native_schedule and mode_value in (2, 4):
+            mode = "custom_self_consumption"
+        else:
+            mode = {
+                2: "self_consumption",
+                3: "reserve",
+                4: "custom_self_consumption",
+            }.get(mode_value, "unknown")
         minimum = max(
             0.0,
             min(100.0, float(lower["value"]) if fresh(lower) else 0.0),
@@ -1495,11 +1498,14 @@ class OptimisationWorker:
             requested_power_w=0.0,
             minimum_soc_percent=minimum,
             maximum_soc_percent=maximum,
-            source="ASW run-mode register 41104 and native battery SOC bounds",
+            source=(
+                "owner-confirmed recurring schedule, ASW effective run-mode "
+                "register 41104 and native battery SOC bounds"
+            ),
             assumption=(
                 "future native schedule windows are not exposed by the documented "
-                "read map; owner-confirmed recurring windows are applied and Custom "
-                "mode follows self-consumption outside them"
+                "read map; owner-confirmed recurring windows define future policy "
+                "even when 41104 reports effective self-consumption outside them"
             ),
             schedule=self.config.native_schedule,
         )

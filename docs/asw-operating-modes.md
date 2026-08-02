@@ -96,6 +96,10 @@ Times are recurring local wall-clock times in the tariff timezone; the end is
 exclusive and overnight windows are supported. Windows must not overlap. An
 explicitly confirmed empty list means the inverter has no native windows. An
 unconfirmed Custom schedule prevents the planning-quality gate from passing.
+On the live firmware, 41104 can report effective self-consumption (`2`) outside
+an owner-configured Custom window and Customer defined (`4`) while the window
+is active. A confirmed recurring schedule therefore defines future baseline
+policy; 41104 remains evidence of the current effective state.
 
 The schedule search compares whole-horizon alternatives rather than making an
 independent greedy decision in each slot. It includes charge/discharge
