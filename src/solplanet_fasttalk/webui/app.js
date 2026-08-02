@@ -283,6 +283,7 @@ function renderRecommendation() {
     grid_charge: "↓",
     export_discharge: "↑",
     self_consumption: "↔",
+    preserve_native: "○",
     reserve: "—",
     hold: "—",
   };
@@ -292,6 +293,8 @@ function renderRecommendation() {
     "actionTitle",
     action === "self_consumption"
       ? "Custom self-consumption · no active window"
+      : action === "preserve_native"
+        ? "Keep the native ASW schedule unchanged"
       : action === "grid_charge"
         ? `Grid-charge window at ${formatPower(recommendation.command_power_w)}`
         : action === "export_discharge"
@@ -360,7 +363,7 @@ function renderWorkings() {
   setText(
     "constraintStep",
     current
-      ? `SOC ${formatPercent(constraints.reserve_soc_percent)}–${formatPercent(constraints.maximum_soc_percent)}; charge ${formatPower(constraints.charge_limit_w)}, discharge ${formatPower(constraints.discharge_limit_w)}. Native schedule: ${nativeSchedule.confirmed ? `${nativeSchedule.configured_windows || 0} confirmed window(s)` : "unconfirmed"}${nativeSchedule.active_window_readback_matches === true ? "; active window matches ASW readback" : ""}.`
+      ? `Trajectory SOC ${formatPercent(constraints.trajectory_minimum_soc_percent ?? constraints.reserve_soc_percent)}–${formatPercent(constraints.trajectory_maximum_soc_percent ?? constraints.maximum_soc_percent)}; charge ${formatPower(constraints.charge_limit_w)}, discharge ${formatPower(constraints.discharge_limit_w)}. Native schedule: ${nativeSchedule.confirmed ? `${nativeSchedule.configured_windows || 0} confirmed window(s)` : "unconfirmed"}${nativeSchedule.active_window_readback_matches === true ? "; active window matches ASW readback" : ""}.`
       : "BMS, SOC and configured site boundaries are checked before every recommendation.",
   );
   setText(

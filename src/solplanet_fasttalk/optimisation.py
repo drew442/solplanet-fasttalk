@@ -523,31 +523,6 @@ def simulate_plan(
             )
         )
 
-    default_stored_wh = initial_wh
-    default_dispatches: list[Dispatch] = []
-    default_flows: list[tuple[dt.datetime, float, float]] = []
-    for slot in ordered_slots:
-        dispatched = _self_consumption_dispatch(
-            natural_grid_w=slot.load_w - slot.pv_w,
-            stored_wh=default_stored_wh,
-            minimum_wh=minimum_wh,
-            maximum_wh=maximum_wh,
-            charge_limit_w=charge_limit_w,
-            discharge_limit_w=discharge_limit_w,
-            step_hours=step_hours,
-            charge_efficiency=config.charge_efficiency,
-            discharge_efficiency=config.discharge_efficiency,
-        )
-        default_stored_wh = dispatched.stored_wh
-        default_dispatches.append(dispatched)
-        default_flows.append(
-            (
-                slot.timestamp,
-                max(0.0, dispatched.grid_power_w) * step_hours / 1000.0,
-                max(0.0, -dispatched.grid_power_w) * step_hours / 1000.0,
-            )
-        )
-
     root = SearchNode(initial_wh, 0.0, 0.0, None, 0.0, 0, None, None)
     nodes = [root]
     energy_quantum_wh = max(100.0, capacity_wh * 0.005)
@@ -712,14 +687,25 @@ def simulate_plan(
 
     energy_adjustment = terminal_adjustment(optimized_dispatches)
     estimated_improvement = baseline_cost - optimized_cost - energy_adjustment
-    if estimated_improvement <= 0.000001 and any(
-        item.window_mode != "none" for item in optimized_dispatches
-    ):
-        optimized_dispatches = default_dispatches
-        optimized_flows = default_flows
-        optimized_cost = _bill(tariff, optimized_flows, config.step_minutes)
-        energy_adjustment = terminal_adjustment(optimized_dispatches)
-        estimated_improvement = baseline_cost - optimized_cost - energy_adjustment
+    if estimated_improvement <= 0.000001:
+        optimized_dispatches = [
+            Dispatch(
+                "preserve_native",
+                "none",
+                0.0,
+                dispatched.battery_power_w,
+                dispatched.grid_power_w,
+                dispatched.stored_wh,
+                (
+                    "no daemon intervention improves on the owner-confirmed native ASW policy",
+                ),
+            )
+            for dispatched in baseline_dispatches
+        ]
+        optimized_flows = list(baseline_flows)
+        optimized_cost = baseline_cost
+        energy_adjustment = 0.0
+        estimated_improvement = 0.0
 
     cumulative_load_uncertainty_wh = 0.0
     recommendations: list[Recommendation] = []
@@ -736,6 +722,16 @@ def simulate_plan(
         ) * step_hours / min(config.charge_efficiency, config.discharge_efficiency)
         expected_soc = optimized.stored_wh / capacity_wh * 100.0
         soc_uncertainty = cumulative_load_uncertainty_wh / capacity_wh * 100.0
+        trajectory_minimum_soc = (
+            baseline_policy.minimum_soc_percent
+            if optimized.action == "preserve_native"
+            else config.reserve_soc_percent
+        )
+        trajectory_maximum_soc = (
+            baseline_policy.maximum_soc_percent
+            if optimized.action == "preserve_native"
+            else config.maximum_soc_percent
+        )
         quote = tariff.quote(slot.timestamp)
         explanations = optimized.explanation + (
             f"forecast load {slot.load_w:.0f} W and PV {slot.pv_w:.0f} W",
@@ -744,8 +740,8 @@ def simulate_plan(
                 f"and export ${quote.export_price_per_kwh:.3f}/kWh"
             ),
             (
-                f"SOC kept within {config.reserve_soc_percent:.1f}%–"
-                f"{config.maximum_soc_percent:.1f}%"
+                f"trajectory SOC kept within {trajectory_minimum_soc:.1f}%–"
+                f"{trajectory_maximum_soc:.1f}%"
             ),
         )
         recommendations.append(
@@ -768,8 +764,8 @@ def simulate_plan(
                 round(optimized.battery_power_w, 3),
                 round(optimized.grid_power_w, 3),
                 round(expected_soc, 3),
-                round(max(config.reserve_soc_percent, expected_soc - soc_uncertainty), 3),
-                round(min(config.maximum_soc_percent, expected_soc + soc_uncertainty), 3),
+                round(max(trajectory_minimum_soc, expected_soc - soc_uncertainty), 3),
+                round(min(trajectory_maximum_soc, expected_soc + soc_uncertainty), 3),
                 quote.import_price_per_kwh,
                 quote.export_price_per_kwh,
                 explanations,
@@ -790,6 +786,8 @@ def simulate_plan(
                     "site_export_limit_w": config.site_export_limit_watts,
                     "reserve_soc_percent": config.reserve_soc_percent,
                     "maximum_soc_percent": config.maximum_soc_percent,
+                    "trajectory_minimum_soc_percent": trajectory_minimum_soc,
+                    "trajectory_maximum_soc_percent": trajectory_maximum_soc,
                     "manufacturer_max_charge_w": ASW12KH_T3_MAX_BATTERY_CHARGE_W,
                     "manufacturer_max_discharge_w": ASW12KH_T3_MAX_BATTERY_DISCHARGE_W,
                 },

@@ -106,8 +106,9 @@ independent greedy decision in each slot. It includes charge/discharge
 efficiency, reserve and maximum SOC, site limits, the tariff's Super Export cap,
 and a minimum intervention margin. The optimized trajectory must end with at
 least the energy of the no-change self-consumption baseline. If no fixed-window
-trajectory reduces cost, the recommendation remains self-consumption with no
-window.
+trajectory reduces cost, the recommendation is `preserve_native`: the shadow
+trajectory exactly follows the confirmed native schedule and reports zero
+improvement rather than proposing a more expensive removal of that schedule.
 
 An instantaneous BMS current allowance is not extrapolated across the horizon.
 It commonly falls to zero at an SOC boundary and would otherwise make tomorrow's

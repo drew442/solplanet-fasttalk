@@ -962,6 +962,10 @@ class Phase6Tests(unittest.TestCase):
             result["hardware_limits"]["observed_current_charge_limit_w"],
             0,
         )
+        self.assertGreaterEqual(
+            result["simulation"]["estimated_cost_improvement"],
+            0,
+        )
 
     def test_confirmed_schedule_overrides_effective_self_consumption_readback(self):
         schedule = (
@@ -1141,7 +1145,7 @@ class Phase6Tests(unittest.TestCase):
         )
         self.assertEqual(
             {item["action"] for item in result["recommendations"]},
-            {"self_consumption"},
+            {"preserve_native"},
         )
         self.assertEqual(result["scheduled_windows"], [])
 
