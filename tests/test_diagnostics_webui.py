@@ -76,6 +76,16 @@ class DiagnosticsHistoryTests(unittest.TestCase):
             initialize_database(database)
             now = dt.datetime.now(dt.timezone.utc)
             with sqlite3.connect(database) as connection:
+                connection.execute(
+                    """
+                    INSERT INTO measurements (
+                        observed_at, name, value_num, value_text, unit,
+                        quality, source, authority, access_mode, metadata_json
+                    ) VALUES (?, 'grid.active_power', 0, NULL, 'W', 'good',
+                              'test', 'authoritative', 'test', '{}')
+                    """,
+                    ((now - dt.timedelta(days=3)).isoformat(),),
+                )
                 for observed_at, used in (
                     (now - dt.timedelta(days=1), 100_000),
                     (now, 200_000),
@@ -98,6 +108,10 @@ class DiagnosticsHistoryTests(unittest.TestCase):
         self.assertGreater(
             status["growth"]["projected_total_bytes_365_days"],
             status["current"]["total_bytes"],
+        )
+        self.assertLess(
+            status["growth"]["projected_total_bytes_365_days"],
+            status["growth"]["linear_total_bytes_365_days"],
         )
 
 

@@ -231,8 +231,12 @@ forecast, plan and recent events. It contains no Forecast.Solar API key or
 plant coordinates.
 
 The System section shows the current SQLite database, WAL and shared-memory
-footprint as one on-disk total. It also shows recent growth per day and linear
-30-day/one-year projections. The estimate is visibly labelled `rough` while it
+footprint as one on-disk total. It also shows recent growth per day and
+retention-aware 30-day/one-year projections. During the initial raw-retention
+window, high-rate telemetry growth is capped at that boundary and a visible
+allowance is made for longer-lived compact data; the unbounded linear values
+remain available in the API for diagnosis. The estimate is visibly labelled
+`rough` while it
 uses database age, becomes `preliminary` after six hours of maintenance size
 observations, and becomes `established` after seven days. Projections state
 that configured retention pruning will eventually flatten growth and that WAL

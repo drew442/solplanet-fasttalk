@@ -258,7 +258,13 @@ class API:
                     elif parsed.path == "/v1/training/coverage":
                         self._json(api.history.training_coverage())
                     elif parsed.path == "/v1/storage":
-                        self._json(api.history.storage_status())
+                        self._json(
+                            api.history.storage_status(
+                                raw_retention_days=(
+                                    api.config.storage.raw_retention_days
+                                )
+                            )
+                        )
                     elif parsed.path == "/v1/plans/current" and api.plans:
                         self._json(api.plans.snapshot())
                     elif parsed.path == "/v1/plans/history":
@@ -598,6 +604,8 @@ class API:
             "plan": self.plans.snapshot() if self.plans else None,
             "plan_history": self.history.plans(limit=12),
             "financials": financials,
-            "storage": self.history.storage_status(),
+            "storage": self.history.storage_status(
+                raw_retention_days=self.config.storage.raw_retention_days
+            ),
             "events": self.history.events(20),
         }

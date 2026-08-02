@@ -881,7 +881,7 @@ class HistoryReader:
             "location_included": False,
         }
 
-    def storage_status(self) -> dict[str, Any]:
+    def storage_status(self, *, raw_retention_days: int = 14) -> dict[str, Any]:
         """Report physical size and a bounded, explicitly qualified projection."""
 
         with self._storage_cache_lock:
@@ -938,6 +938,7 @@ class HistoryReader:
         projection_method = "insufficient_history"
         projection_confidence = "unavailable"
         observation_span_hours = 0.0
+        data_age_days: float | None = None
         if len(observations) >= 2:
             first_time = dt_from_iso(observations[0][0])
             last_time = dt_from_iso(observations[-1][0])
@@ -953,23 +954,52 @@ class HistoryReader:
                     "established" if observation_span_hours >= 168 else "preliminary"
                 )
         if daily_growth is None and earliest:
-            age_days = max(
+            data_age_days = max(
                 1.0,
                 (now - dt_from_iso(earliest)).total_seconds() / 86400.0,
             )
             # Remove a small fixed-schema allowance so a new empty database
             # does not dominate the early rate. This estimate is replaced by
             # observed logical growth after six hours of maintenance samples.
-            daily_growth = max(0.0, used_bytes - 65536) / age_days
+            daily_growth = max(0.0, used_bytes - 65536) / data_age_days
             projection_method = "database_age_estimate"
             projection_confidence = "rough"
+        elif earliest:
+            data_age_days = max(
+                0.0,
+                (now - dt_from_iso(earliest)).total_seconds() / 86400.0,
+            )
 
-        def projected(days: int) -> int | None:
+        def linear_projected(days: int) -> int | None:
             return (
                 round(total_bytes + daily_growth * days)
                 if daily_growth is not None
                 else None
             )
+
+        # During the first raw-retention window, almost all observed growth is
+        # high-rate telemetry that will begin recycling SQLite pages once raw
+        # pruning starts. Keep a visible 1% allowance for long-lived rollups,
+        # forecasts, predictions and financial records until post-retention
+        # observations can measure their actual net rate.
+        compact_growth_fraction = 0.01
+        raw_growth_days_remaining = (
+            max(0.0, raw_retention_days - data_age_days)
+            if data_age_days is not None
+            else None
+        )
+
+        def retention_projected(days: int) -> int | None:
+            if daily_growth is None:
+                return None
+            if raw_growth_days_remaining is None or data_age_days is None:
+                growth_days = float(days)
+            elif data_age_days < raw_retention_days:
+                growth_days = min(float(days), raw_growth_days_remaining)
+                growth_days += days * compact_growth_fraction
+            else:
+                growth_days = float(days)
+            return round(total_bytes + daily_growth * growth_days)
 
         result = {
             "measured_at": now.isoformat(),
@@ -985,15 +1015,29 @@ class HistoryReader:
                 "bytes_per_day": (
                     round(daily_growth) if daily_growth is not None else None
                 ),
-                "projected_total_bytes_30_days": projected(30),
-                "projected_total_bytes_365_days": projected(365),
+                "projected_total_bytes_30_days": retention_projected(30),
+                "projected_total_bytes_365_days": retention_projected(365),
+                "linear_total_bytes_30_days": linear_projected(30),
+                "linear_total_bytes_365_days": linear_projected(365),
                 "method": projection_method,
                 "confidence": projection_confidence,
                 "observation_span_hours": round(observation_span_hours, 2),
+                "data_age_days": (
+                    round(data_age_days, 2) if data_age_days is not None else None
+                ),
+                "raw_retention_days": raw_retention_days,
+                "raw_growth_days_remaining": (
+                    round(raw_growth_days_remaining, 2)
+                    if raw_growth_days_remaining is not None
+                    else None
+                ),
+                "early_compact_growth_fraction": compact_growth_fraction,
                 "note": (
-                    "Linear projection at the recent logical database growth rate; "
-                    "actual long-term growth will flatten as configured retention "
-                    "boundaries begin pruning data. WAL and SHM sizes are transient."
+                    "Retention-aware early projection: high-rate raw telemetry is "
+                    "capped at its configured retention window, with a conservative "
+                    "allowance for longer-lived compact data. It is replaced by "
+                    "observed net growth after retention pruning matures. WAL and "
+                    "SHM sizes are transient."
                 ),
             },
         }
