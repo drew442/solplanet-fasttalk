@@ -1,3 +1,4 @@
+import dataclasses
 import datetime as dt
 import json
 from pathlib import Path
@@ -11,13 +12,16 @@ from zoneinfo import ZoneInfo
 from solplanet_fasttalk.asw import POLL_GROUPS, decode_group as decode_asw
 from solplanet_fasttalk.accounting import FinancialAccountingWorker
 from solplanet_fasttalk.config import (
+    ConfigError,
     ForecastPlane,
     ForecastSolarConfig,
+    NativeScheduleWindow,
     OptimisationConfig,
     StorageConfig,
     TariffConfig,
     WeatherConfig,
     load_config,
+    validate_config,
 )
 from solplanet_fasttalk.forecast import (
     ForecastSolarWorker,
@@ -707,6 +711,38 @@ class Phase5Tests(unittest.TestCase):
 
 
 class Phase6Tests(unittest.TestCase):
+    def test_native_schedule_requires_explicit_confirmation_and_no_overlap(self):
+        configured = load_config(
+            REPOSITORY / "config" / "solplanet-fasttalk.example.toml"
+        )
+        window = NativeScheduleWindow("charge", "09:00", "12:00", 12000)
+        with self.assertRaisesRegex(ConfigError, "must be true"):
+            validate_config(
+                dataclasses.replace(
+                    configured,
+                    optimisation=dataclasses.replace(
+                        configured.optimisation,
+                        native_schedule=(window,),
+                    ),
+                )
+            )
+        with self.assertRaisesRegex(ConfigError, "overlaps"):
+            validate_config(
+                dataclasses.replace(
+                    configured,
+                    optimisation=dataclasses.replace(
+                        configured.optimisation,
+                        native_schedule_confirmed=True,
+                        native_schedule=(
+                            window,
+                            NativeScheduleWindow(
+                                "discharge", "11:30", "13:00", 1000
+                            ),
+                        ),
+                    ),
+                )
+            )
+
     def test_load_profile_uses_weekday_quarter_hour_distribution(self):
         with tempfile.TemporaryDirectory() as directory:
             database = str(Path(directory) / "history.sqlite3")
@@ -877,6 +913,49 @@ class Phase6Tests(unittest.TestCase):
             result["simulation"]["baseline"]["policy"]["mode"],
             "custom_self_consumption",
         )
+
+    def test_recurring_native_charge_window_is_in_no_daemon_baseline(self):
+        tariff = ZeroHeroTariff(TariffConfig())
+        timezone = ZoneInfo("Australia/Sydney")
+        schedule = (
+            NativeScheduleWindow("charge", "09:00", "12:00", 12000),
+        )
+        result = simulate_plan(
+            OptimisationConfig(
+                enabled=True,
+                battery_capacity_kwh=53.76,
+                reserve_soc_percent=10,
+                maximum_soc_percent=100,
+                native_schedule_confirmed=True,
+                native_schedule=schedule,
+            ),
+            tariff,
+            [
+                ForecastSlot(
+                    dt.datetime(2026, 6, day, hour, 0, tzinfo=timezone),
+                    1500,
+                    0,
+                )
+                for day, hour in ((1, 9), (1, 12), (2, 9))
+            ],
+            initial_soc_percent=20,
+            charge_limit_w=12000,
+            discharge_limit_w=12000,
+            native_baseline=NativeBaseline(
+                mode="custom_self_consumption",
+                minimum_soc_percent=10,
+                maximum_soc_percent=100,
+                source="test",
+                assumption="owner supplied",
+                schedule=schedule,
+            ),
+        )
+        recommendations = result["recommendations"]
+        self.assertEqual(recommendations[0]["baseline_battery_power_w"], -12000)
+        self.assertEqual(recommendations[0]["baseline_grid_power_w"], 13500)
+        self.assertEqual(recommendations[1]["baseline_battery_power_w"], 1500)
+        self.assertEqual(recommendations[1]["baseline_grid_power_w"], 0)
+        self.assertEqual(recommendations[2]["baseline_battery_power_w"], -12000)
 
     def test_fixed_discharge_window_does_not_add_site_load(self):
         tariff = ZeroHeroTariff(TariffConfig())

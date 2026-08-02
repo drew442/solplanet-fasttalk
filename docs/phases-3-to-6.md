@@ -146,10 +146,11 @@ dispatch rating.
 
 The no-daemon-change baseline models the ASW's high-level run mode from Modbus
 register 41104. For the confirmed Custom configuration it applies native
-self-consumption outside unknown future schedule windows: the inverter follows
-load and absorbs PV surplus within its native SOC and power bounds. Registers
-41152/41153 are retained as current-state evidence but are not incorrectly
-projected as a fixed command across the horizon. See
+self-consumption outside owner-confirmed recurring native windows: the inverter
+follows load and absorbs PV surplus within its native SOC and power bounds.
+Registers 41152/41153 validate an active configured window but are not
+incorrectly projected as a fixed command across the horizon. An unconfirmed
+native schedule blocks the planning-quality gate. See
 [ASW battery operating modes](asw-operating-modes.md).
 
 The planner uses a complete 15-minute horizon, explicitly filling nighttime

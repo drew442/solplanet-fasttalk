@@ -312,10 +312,11 @@ function renderRecommendation() {
   setText("expectedSoc", formatPercent(recommendation.expected_soc_percent));
   setText("estimatedSaving", formatMoney(plan?.simulation?.estimated_cost_improvement));
   const policy = plan?.simulation?.baseline?.policy;
+  const nativeWindowCount = policy?.schedule?.length || 0;
   setText(
     "baselinePolicy",
     policy
-      ? `No-change baseline: ${title(policy.mode)} within ${formatPercent(policy.minimum_soc_percent)}–${formatPercent(policy.maximum_soc_percent)} native SOC bounds. ${policy.assumption || ""}`
+      ? `No-change baseline: ${title(policy.mode)} within ${formatPercent(policy.minimum_soc_percent)}–${formatPercent(policy.maximum_soc_percent)} native SOC bounds; ${nativeWindowCount} confirmed recurring native window${nativeWindowCount === 1 ? "" : "s"}. ${policy.assumption || ""}`
       : "No-change baseline: native inverter mode unavailable.",
   );
 }
@@ -355,10 +356,11 @@ function renderWorkings() {
   );
   const current = currentRecommendation(plan);
   const constraints = current?.constraints || {};
+  const nativeSchedule = plan.native_schedule_quality || {};
   setText(
     "constraintStep",
     current
-      ? `SOC ${formatPercent(constraints.reserve_soc_percent)}–${formatPercent(constraints.maximum_soc_percent)}; charge ${formatPower(constraints.charge_limit_w)}, discharge ${formatPower(constraints.discharge_limit_w)}.`
+      ? `SOC ${formatPercent(constraints.reserve_soc_percent)}–${formatPercent(constraints.maximum_soc_percent)}; charge ${formatPower(constraints.charge_limit_w)}, discharge ${formatPower(constraints.discharge_limit_w)}. Native schedule: ${nativeSchedule.confirmed ? `${nativeSchedule.configured_windows || 0} confirmed window(s)` : "unconfirmed"}${nativeSchedule.active_window_readback_matches === true ? "; active window matches ASW readback" : ""}.`
       : "BMS, SOC and configured site boundaries are checked before every recommendation.",
   );
   setText(

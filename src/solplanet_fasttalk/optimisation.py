@@ -10,7 +10,7 @@ import threading
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .config import OptimisationConfig
+from .config import NativeScheduleWindow, OptimisationConfig
 from .forecast import ForecastStore
 from .model import PlantState, utc_now
 from .tariff import ZeroHeroTariff
@@ -82,6 +82,7 @@ class NativeBaseline:
         "Custom mode has no known future fixed-power windows; outside a "
         "window the ASW autonomously matches site consumption"
     )
+    schedule: tuple[NativeScheduleWindow, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,30 @@ def _planning_bucket_ids(
         math.ceil(now.timestamp() / step_seconds),
         math.floor(cutoff.timestamp() / step_seconds) + 1,
     )
+
+
+def _native_schedule_window(
+    timestamp: dt.datetime,
+    schedule: tuple[NativeScheduleWindow, ...],
+    timezone: dt.tzinfo,
+) -> NativeScheduleWindow | None:
+    """Return the recurring daily native window active at a timestamp."""
+
+    local = timestamp.astimezone(timezone)
+    minute = local.hour * 60 + local.minute
+    for window in schedule:
+        start_hour, start_minute = (int(part) for part in window.starts_at.split(":"))
+        end_hour, end_minute = (int(part) for part in window.ends_at.split(":"))
+        starts = start_hour * 60 + start_minute
+        ends = end_hour * 60 + end_minute
+        active = (
+            starts <= minute < ends
+            if starts < ends
+            else minute >= starts or minute < ends
+        )
+        if active:
+            return window
+    return None
 
 
 def _bill(
@@ -401,6 +426,25 @@ def simulate_plan(
             "custom_self_consumption",
             "self_consumption",
         ):
+            native_window = _native_schedule_window(
+                slot.timestamp,
+                baseline_policy.schedule,
+                tariff.timezone,
+            )
+            if baseline_policy.mode == "custom_self_consumption" and native_window:
+                return _fixed_window_dispatch(
+                    direction=native_window.mode,
+                    command_power_w=native_window.power_watts,
+                    natural_grid_w=natural_grid_w,
+                    stored_wh=stored_wh,
+                    minimum_wh=baseline_minimum_wh,
+                    maximum_wh=baseline_maximum_wh,
+                    charge_limit_w=charge_limit_w,
+                    discharge_limit_w=discharge_limit_w,
+                    step_hours=step_hours,
+                    charge_efficiency=config.charge_efficiency,
+                    discharge_efficiency=config.discharge_efficiency,
+                )
             return _self_consumption_dispatch(
                 natural_grid_w=natural_grid_w,
                 stored_wh=stored_wh,
@@ -1065,6 +1109,43 @@ class OptimisationWorker:
             observed_discharge,
         )
         native_baseline = self._native_baseline(required)
+        active_native_window = _native_schedule_window(
+            now,
+            native_baseline.schedule,
+            self.tariff.timezone,
+        )
+        state_input = required.get("asw.control.charge_discharge_state")
+        command_input = required.get("asw.control.power_command")
+        state_fresh = bool(
+            state_input
+            and state_input["quality"] == "good"
+            and isinstance(state_input["value"], (int, float))
+        )
+        command_fresh = bool(
+            command_input
+            and command_input["quality"] == "good"
+            and isinstance(command_input["value"], (int, float))
+        )
+        expected_state = (
+            2 if active_native_window and active_native_window.mode == "charge"
+            else 3 if active_native_window else None
+        )
+        expected_command_w = (
+            (-1 if active_native_window.mode == "charge" else 1)
+            * active_native_window.power_watts
+            if active_native_window
+            else None
+        )
+        current_window_matches = (
+            bool(
+                state_fresh
+                and command_fresh
+                and int(state_input["value"]) == expected_state
+                and abs(float(command_input["value"]) - expected_command_w) <= 50
+            )
+            if active_native_window
+            else None
+        )
         result = simulate_plan(
             self.config,
             self.tariff,
@@ -1098,6 +1179,11 @@ class OptimisationWorker:
             and load_profile_ready
             and load_accuracy_ready
             and missing_daylight_buckets == 0
+            and (
+                native_baseline.mode != "custom_self_consumption"
+                or self.config.native_schedule_confirmed
+            )
+            and current_window_matches is not False
         )
         improvement = result["simulation"]["estimated_cost_improvement"]
         status = (
@@ -1123,6 +1209,17 @@ class OptimisationWorker:
         if missing_daylight_buckets:
             quality_reasons.append(
                 f"PV provider has {missing_daylight_buckets} missing daylight intervals"
+            )
+        if (
+            native_baseline.mode == "custom_self_consumption"
+            and not self.config.native_schedule_confirmed
+        ):
+            quality_reasons.append(
+                "native Custom schedule has not been explicitly confirmed"
+            )
+        if current_window_matches is False:
+            quality_reasons.append(
+                "active native schedule window does not match ASW direction/power readback"
             )
         if improvement <= 0:
             quality_reasons.append(
@@ -1177,6 +1274,21 @@ class OptimisationWorker:
             "planning_quality": {
                 "control_ready": planning_quality_ready,
                 "reasons": quality_reasons,
+            },
+            "native_schedule_quality": {
+                "source": "owner-supplied recurring local-time configuration",
+                "confirmed": self.config.native_schedule_confirmed,
+                "configured_windows": len(native_baseline.schedule),
+                "active_window": (
+                    asdict(active_native_window) if active_native_window else None
+                ),
+                "expected_state": expected_state,
+                "expected_power_command_w": expected_command_w,
+                "active_window_readback_matches": current_window_matches,
+                "note": (
+                    "the documented ASW read map does not expose future schedule times; "
+                    "41152/41153 validate an active configured window only"
+                ),
             },
             **result,
             "control_commands_sent": 0,
@@ -1352,8 +1464,8 @@ class OptimisationWorker:
                 upper_field=upper_field,
             )
 
-    @staticmethod
     def _native_baseline(
+        self,
         inputs: dict[str, dict[str, Any] | None],
     ) -> NativeBaseline:
         run_mode = inputs.get("asw.control.run_mode")
@@ -1385,10 +1497,11 @@ class OptimisationWorker:
             maximum_soc_percent=maximum,
             source="ASW run-mode register 41104 and native battery SOC bounds",
             assumption=(
-                "future native schedule windows are not exposed; Custom mode "
-                "therefore follows documented self-consumption behavior outside "
-                "known fixed-power windows"
+                "future native schedule windows are not exposed by the documented "
+                "read map; owner-confirmed recurring windows are applied and Custom "
+                "mode follows self-consumption outside them"
             ),
+            schedule=self.config.native_schedule,
         )
 
     def _load_profile(

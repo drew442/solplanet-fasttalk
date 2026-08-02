@@ -75,6 +75,28 @@ nighttime Forecast.Solar points become explicit zero-PV slots, so load, grid
 flow, tariff cost and SOC continue across sunset and sunrise. A missing point
 inside a provider day's daylight bounds is a quality fault, not assumed night.
 
+Recurring native Custom windows are part of the no-daemon-change baseline.
+The documented read map exposes the direction/power of a window only while it
+is active, not its future start/end times. Every native window must therefore
+be declared in the untracked private runtime configuration and explicitly
+confirmed:
+
+```toml
+[optimisation]
+native_schedule_confirmed = true
+
+[[optimisation.native_schedule]]
+mode = "charge"
+starts_at = "PRIVATE_LOCAL_START"
+ends_at = "PRIVATE_LOCAL_END"
+power_watts = 12000
+```
+
+Times are recurring local wall-clock times in the tariff timezone; the end is
+exclusive and overnight windows are supported. Windows must not overlap. An
+explicitly confirmed empty list means the inverter has no native windows. An
+unconfirmed Custom schedule prevents the planning-quality gate from passing.
+
 The schedule search compares whole-horizon alternatives rather than making an
 independent greedy decision in each slot. It includes charge/discharge
 efficiency, reserve and maximum SOC, site limits, the tariff's Super Export cap,
@@ -86,10 +108,10 @@ window.
 ## Readback and future control boundary
 
 The daemon now reads 41102–41105 as a bounded holding-register read. Register
-41104 supplies the current high-level run mode. Registers 41152/41153 remain
-useful current-state evidence but are not projected across the future: an
-instantaneous charge/discharge direction is not proof that the same fixed
-window persists for 36 hours.
+41104 supplies the current high-level run mode. Registers 41152/41153 validate
+the expected direction and power when a configured native window is active,
+but are not projected across the future: an instantaneous charge/discharge
+direction is not proof that the same fixed window persists for 36 hours.
 
 No schedule registers have been confirmed for this exact firmware. No write
 transport exists in the optimiser, `execution_available` remains false and all

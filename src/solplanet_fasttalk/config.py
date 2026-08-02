@@ -109,6 +109,14 @@ class WeatherConfig:
 
 
 @dataclass(frozen=True)
+class NativeScheduleWindow:
+    mode: str
+    starts_at: str
+    ends_at: str
+    power_watts: float
+
+
+@dataclass(frozen=True)
 class OptimisationConfig:
     enabled: bool = False
     interval_seconds: int = 300
@@ -124,6 +132,8 @@ class OptimisationConfig:
     site_import_limit_watts: float = 30000.0
     site_export_limit_watts: float = 30000.0
     minimum_arbitrage_margin_per_kwh: float = 0.03
+    native_schedule_confirmed: bool = False
+    native_schedule: tuple[NativeScheduleWindow, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -200,6 +210,18 @@ def load_config(path: str | os.PathLike[str]) -> DaemonConfig:
             raise ConfigError("each forecast_solar plane must be a TOML table")
         planes.append(_construct(ForecastPlane, raw_plane))
     forecast_values["planes"] = tuple(planes)
+    optimisation_values = dict(_table(data, "optimisation"))
+    raw_native_schedule = optimisation_values.pop("native_schedule", [])
+    if not isinstance(raw_native_schedule, list):
+        raise ConfigError("optimisation.native_schedule must be an array of tables")
+    native_schedule: list[NativeScheduleWindow] = []
+    for raw_window in raw_native_schedule:
+        if not isinstance(raw_window, dict):
+            raise ConfigError(
+                "each optimisation native_schedule window must be a TOML table"
+            )
+        native_schedule.append(_construct(NativeScheduleWindow, raw_window))
+    optimisation_values["native_schedule"] = tuple(native_schedule)
     config = DaemonConfig(
         database=database,
         api=_construct(APIConfig, _table(data, "api")),
@@ -210,9 +232,7 @@ def load_config(path: str | os.PathLike[str]) -> DaemonConfig:
         tariff=_construct(TariffConfig, _table(data, "tariff")),
         forecast_solar=_construct(ForecastSolarConfig, forecast_values),
         weather=_construct(WeatherConfig, _table(data, "weather")),
-        optimisation=_construct(
-            OptimisationConfig, _table(data, "optimisation")
-        ),
+        optimisation=_construct(OptimisationConfig, optimisation_values),
     )
     validate_config(config)
     return config
@@ -384,6 +404,50 @@ def validate_config(config: DaemonConfig) -> None:
         raise ConfigError("optimisation.step_minutes must be 5, 15, 30, or 60")
     if not 0 <= optimisation.reserve_soc_percent < optimisation.maximum_soc_percent <= 100:
         raise ConfigError("optimisation SOC limits are invalid")
+
+    def clock_minutes(value: str, field: str) -> int:
+        if not isinstance(value, str):
+            raise ConfigError(f"{field} must use HH:MM local time")
+        parts = value.split(":")
+        if (
+            len(parts) != 2
+            or any(len(part) != 2 or not part.isdigit() for part in parts)
+        ):
+            raise ConfigError(f"{field} must use HH:MM local time")
+        hour, minute = (int(part) for part in parts)
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            raise ConfigError(f"{field} must use HH:MM local time")
+        return hour * 60 + minute
+
+    schedule_segments: list[tuple[int, int, int]] = []
+    if optimisation.native_schedule and not optimisation.native_schedule_confirmed:
+        raise ConfigError(
+            "optimisation.native_schedule_confirmed must be true when native windows are supplied"
+        )
+    for index, window in enumerate(optimisation.native_schedule):
+        prefix = f"optimisation.native_schedule[{index}]"
+        if window.mode not in ("charge", "discharge"):
+            raise ConfigError(f"{prefix}.mode must be charge or discharge")
+        if not isinstance(window.power_watts, (int, float)) or not (
+            0 < window.power_watts <= 12000
+        ):
+            raise ConfigError(f"{prefix}.power_watts must be in (0, 12000]")
+        starts = clock_minutes(window.starts_at, f"{prefix}.starts_at")
+        ends = clock_minutes(window.ends_at, f"{prefix}.ends_at")
+        if starts == ends:
+            raise ConfigError(f"{prefix} must not span a full day or zero time")
+        segments = (
+            ((starts, ends),)
+            if starts < ends
+            else ((starts, 24 * 60), (0, ends))
+        )
+        for lower, upper in segments:
+            for other_lower, other_upper, other_index in schedule_segments:
+                if lower < other_upper and other_lower < upper:
+                    raise ConfigError(
+                        f"{prefix} overlaps optimisation.native_schedule[{other_index}]"
+                    )
+            schedule_segments.append((lower, upper, index))
     for value, name in (
         (optimisation.battery_capacity_kwh, "battery_capacity_kwh"),
         (optimisation.max_charge_watts, "max_charge_watts"),

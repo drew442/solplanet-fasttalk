@@ -127,3 +127,16 @@ discharge_efficiency = 0.95
 site_import_limit_watts = 30000
 site_export_limit_watts = 30000
 minimum_arbitrage_margin_per_kwh = 0.03
+# The documented read map does not expose future Custom-mode schedule times.
+# Keep false until every recurring native window has been copied into a private
+# runtime configuration. Set true with an empty list only after confirming that
+# the inverter has no native windows.
+native_schedule_confirmed = false
+
+# Example only; put the plant's real recurring local-time windows in its
+# untracked private runtime configuration.
+# [[optimisation.native_schedule]]
+# mode = "charge"
+# starts_at = "00:00"
+# ends_at = "01:00"
+# power_watts = 12000

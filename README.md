@@ -187,7 +187,11 @@ user's minimum reserve requirements.
 
 The current optimiser is deliberately shadow-only: it publishes an explained,
 constrained recommendation schedule and replay comparison but cannot execute
-the schedule. Missing or stale required data produces no action.
+the schedule. Owner-confirmed recurring native inverter windows are included in
+the no-daemon-change baseline; because their future times are not exposed by
+the documented ASW read map, real window times belong only in the untracked
+private runtime configuration. Missing or stale required data produces no
+action.
 
 ## API direction
 

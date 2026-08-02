@@ -57,7 +57,8 @@ count, minimum and maximum for diagnostics.
   tilted-irradiance PV potential from Open-Meteo;
 - expected grid power with the shadow schedule;
 - grid and SOC baselines using the inverter's high-level run mode, including
-  native load-following self-consumption outside Custom windows;
+  owner-confirmed recurring native Custom windows and load-following
+  self-consumption outside them;
 - forecast battery SOC;
 - native/no-change and shadow-counterfactual battery SOC trajectories;
 - historical load and native-SOC forecast accuracy as actuals accumulate;
@@ -81,8 +82,9 @@ is visibly distinct from control readiness. Details are in
 
 The baseline is explicitly an estimate, not a claim about hidden inverter
 logic. It uses register 41104 for the high-level mode and, in Custom mode,
-models the documented no-window self-consumption behavior. Unknown future
-native schedule windows remain explicit. Hardware-limit evidence distinguishes
+models configured recurring native windows plus the documented no-window
+self-consumption behavior. The workings show whether the native schedule was
+confirmed and whether an active window matches 41152/41153 readback. Hardware-limit evidence distinguishes
 the ASW12kH-T3 12 kW battery rating from its inapplicable 10-second EPS overload
 rating. Detailed evidence is in
 [ASW battery operating modes](asw-operating-modes.md).
