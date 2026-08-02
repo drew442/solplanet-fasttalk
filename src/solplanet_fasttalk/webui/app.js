@@ -632,6 +632,14 @@ function renderSchedule() {
       ? `${formatPercent(confidence.score, true)} · ${formatPercent(confidence.effective_reserve_soc_percent)} SOC protected`
       : "High buffer — confidence not scored",
   );
+  const costNeutral = confidence?.cost_neutral_target;
+  setText(
+    "costNeutralTarget",
+    costNeutral?.premium_export_kwh_if_no_import_cost !== null
+      && costNeutral?.premium_export_kwh_if_no_import_cost !== undefined
+      ? `${Number(costNeutral.premium_export_kwh_if_no_import_cost).toFixed(2)} kWh premium export after ZEROHERO`
+      : "Unavailable",
+  );
 
   const tariffPoints = state.historical.tariff || [];
   renderChart("tariffFutureChart", [

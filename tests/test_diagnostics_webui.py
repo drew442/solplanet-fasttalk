@@ -248,6 +248,7 @@ class DiagnosticsAssetTests(unittest.TestCase):
         self.assertIn('id="storageCurrent"', html)
         self.assertIn('id="storageDailyGrowth"', html)
         self.assertIn('id="forecastConfidence"', html)
+        self.assertIn('id="costNeutralTarget"', html)
         self.assertIn("effective_reserve_soc_percent", javascript)
 
 
