@@ -56,16 +56,16 @@ count, minimum and maximum for diagnostics.
 - cloud cover, precipitation probability, temperature and independent
   tilted-irradiance PV potential from Open-Meteo;
 - expected grid power with the shadow schedule;
-- grid and SOC baselines produced by continuing the inverter's currently
-  stored native operating mode and power command;
+- grid and SOC baselines using the inverter's high-level run mode, including
+  native load-following self-consumption outside Custom windows;
 - forecast battery SOC;
 - native/no-change and shadow-counterfactual battery SOC trajectories;
 - historical load and native-SOC forecast accuracy as actuals accumulate;
 - the load forecast's historical 10th–90th percentile range; and
 - retained 15-minute training-data coverage;
 - future import and export tariff prices; and
-- upcoming charge, discharge and hold recommendations with their interval
-  prices.
+- upcoming no-window self-consumption, grid-charge-window and
+  export-discharge-window recommendations with their interval prices.
 
 ### Workings
 
@@ -80,10 +80,12 @@ is visibly distinct from control readiness. Details are in
 [Data quality and forecasting](data-quality-and-forecasting.md).
 
 The baseline is explicitly an estimate, not a claim about hidden inverter
-logic. It assumes the fresh native charge/hold/discharge command persists until
-the native SOC bound and states that future native schedule changes are
-unknown. Hardware-limit evidence distinguishes the ASW12kH-T3 12 kW battery
-rating from its inapplicable 10-second EPS overload rating.
+logic. It uses register 41104 for the high-level mode and, in Custom mode,
+models the documented no-window self-consumption behavior. Unknown future
+native schedule windows remain explicit. Hardware-limit evidence distinguishes
+the ASW12kH-T3 12 kW battery rating from its inapplicable 10-second EPS overload
+rating. Detailed evidence is in
+[ASW battery operating modes](asw-operating-modes.md).
 
 The UI never implies that a shadow recommendation has been executed. It
 repeats that command execution is unavailable and the daemon has sent zero

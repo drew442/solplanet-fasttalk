@@ -39,12 +39,16 @@ class LoadBucket:
     lower_w: float
     upper_w: float
     samples: int
+    scope: str = "weekday"
 
 
 @dataclass(frozen=True)
 class Recommendation:
     timestamp: str
     action: str
+    asw_mode: str
+    window_mode: str
+    command_power_w: float
     forecast_load_w: float
     forecast_pv_w: float
     forecast_base_pv_w: float
@@ -69,14 +73,38 @@ class Recommendation:
 
 @dataclass(frozen=True)
 class NativeBaseline:
-    mode: str = "hold"
+    mode: str = "custom_self_consumption"
     requested_power_w: float = 0.0
     minimum_soc_percent: float = 0.0
     maximum_soc_percent: float = 100.0
-    source: str = "fallback"
+    source: str = "confirmed plant default"
     assumption: str = (
-        "hold battery because a fresh native inverter command was unavailable"
+        "Custom mode has no known future fixed-power windows; outside a "
+        "window the ASW autonomously matches site consumption"
     )
+
+
+@dataclass(frozen=True)
+class Dispatch:
+    action: str
+    window_mode: str
+    command_power_w: float
+    battery_power_w: float
+    grid_power_w: float
+    stored_wh: float
+    explanation: tuple[str, ...]
+
+
+@dataclass
+class SearchNode:
+    stored_wh: float
+    objective_cost: float
+    intervention_penalty: float
+    premium_date: dt.date | None
+    premium_exported_kwh: float
+    fixed_intervals: int
+    parent: "SearchNode | None"
+    dispatch: Dispatch | None
 
 
 def _quantile(values: list[float], probability: float) -> float:
@@ -90,6 +118,19 @@ def _quantile(values: list[float], probability: float) -> float:
         return ordered[lower]
     fraction = position - lower
     return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
+
+
+def _planning_bucket_ids(
+    now: dt.datetime,
+    cutoff: dt.datetime,
+    step_seconds: int,
+) -> range:
+    """Return every planning interval, including zero-PV overnight slots."""
+
+    return range(
+        math.ceil(now.timestamp() / step_seconds),
+        math.floor(cutoff.timestamp() / step_seconds) + 1,
+    )
 
 
 def _bill(
@@ -130,6 +171,149 @@ def _bill(
         ):
             cost -= 1.0
     return cost
+
+
+def _self_consumption_dispatch(
+    *,
+    natural_grid_w: float,
+    stored_wh: float,
+    minimum_wh: float,
+    maximum_wh: float,
+    charge_limit_w: float,
+    discharge_limit_w: float,
+    step_hours: float,
+    charge_efficiency: float,
+    discharge_efficiency: float,
+) -> Dispatch:
+    """Model Custom mode outside a fixed-power schedule."""
+
+    battery_power_w = 0.0
+    explanation = "custom mode self-consumption is active with no fixed-power window"
+    if natural_grid_w > 0:
+        available_w = max(
+            0.0,
+            (stored_wh - minimum_wh)
+            * discharge_efficiency
+            / max(step_hours, 0.001),
+        )
+        battery_power_w = min(
+            natural_grid_w,
+            discharge_limit_w,
+            available_w,
+        )
+        stored_wh -= (
+            battery_power_w
+            * step_hours
+            / discharge_efficiency
+        )
+        explanation = (
+            "custom mode automatically discharges only enough to follow site consumption"
+        )
+    elif natural_grid_w < 0:
+        room_w = max(
+            0.0,
+            (maximum_wh - stored_wh)
+            / max(step_hours * charge_efficiency, 0.001),
+        )
+        charge_w = min(-natural_grid_w, charge_limit_w, room_w)
+        battery_power_w = -charge_w
+        stored_wh += charge_w * step_hours * charge_efficiency
+        explanation = (
+            "custom mode automatically absorbs available site PV surplus"
+        )
+    stored_wh = min(maximum_wh, max(minimum_wh, stored_wh))
+    return Dispatch(
+        "self_consumption",
+        "none",
+        0.0,
+        battery_power_w,
+        natural_grid_w - battery_power_w,
+        stored_wh,
+        (explanation,),
+    )
+
+
+def _fixed_window_dispatch(
+    *,
+    direction: str,
+    command_power_w: float,
+    natural_grid_w: float,
+    stored_wh: float,
+    minimum_wh: float,
+    maximum_wh: float,
+    charge_limit_w: float,
+    discharge_limit_w: float,
+    step_hours: float,
+    charge_efficiency: float,
+    discharge_efficiency: float,
+) -> Dispatch:
+    """Model the ASW fixed battery-power semantics inside a Custom window."""
+
+    if direction == "charge":
+        room_w = max(
+            0.0,
+            (maximum_wh - stored_wh)
+            / max(step_hours * charge_efficiency, 0.001),
+        )
+        power_w = min(abs(command_power_w), charge_limit_w, room_w)
+        stored_wh += power_w * step_hours * charge_efficiency
+        battery_power_w = -power_w
+        action = "grid_charge"
+        explanation = (
+            "fixed Custom charge window commands battery input power; site load is not folded into the command",
+        )
+    elif direction == "discharge":
+        available_w = max(
+            0.0,
+            (stored_wh - minimum_wh)
+            * discharge_efficiency
+            / max(step_hours, 0.001),
+        )
+        power_w = min(abs(command_power_w), discharge_limit_w, available_w)
+        stored_wh -= power_w * step_hours / discharge_efficiency
+        battery_power_w = power_w
+        action = "export_discharge"
+        explanation = (
+            "fixed Custom discharge window commands battery output power; site load remains an independent grid-balance term",
+        )
+    else:
+        raise ValueError("fixed window direction must be charge or discharge")
+    stored_wh = min(maximum_wh, max(minimum_wh, stored_wh))
+    return Dispatch(
+        action,
+        direction,
+        power_w,
+        battery_power_w,
+        natural_grid_w - battery_power_w,
+        stored_wh,
+        explanation,
+    )
+
+
+def _slot_financial_cost(
+    tariff: ZeroHeroTariff,
+    timestamp: dt.datetime,
+    grid_power_w: float,
+    step_hours: float,
+    premium_date: dt.date | None,
+    premium_exported_kwh: float,
+) -> tuple[float, dt.date, float]:
+    """Return exact interval cost with the daily Super Export cap."""
+
+    quote = tariff.quote(timestamp)
+    local_date = timestamp.astimezone(tariff.timezone).date()
+    used = premium_exported_kwh if premium_date == local_date else 0.0
+    imported = max(0.0, grid_power_w) * step_hours / 1000.0
+    exported = max(0.0, -grid_power_w) * step_hours / 1000.0
+    cost = imported * quote.import_price_per_kwh
+    if quote.export_period == "super_export":
+        premium = min(exported, max(0.0, 15.0 - used))
+        cost -= premium * quote.export_price_per_kwh
+        cost -= (exported - premium) * 0.05
+        used = min(15.0, used + exported)
+    else:
+        cost -= exported * quote.export_price_per_kwh
+    return cost, local_date, used
 
 
 class PlanStore:
@@ -175,7 +359,7 @@ def simulate_plan(
     discharge_limit_w: float,
     native_baseline: NativeBaseline | None = None,
 ) -> dict[str, Any]:
-    """Compare a shadow schedule with continuation of the native command."""
+    """Plan fixed windows around the ASW's native self-consumption behavior."""
 
     baseline_policy = native_baseline or NativeBaseline()
     charge_limit_w = max(
@@ -186,255 +370,363 @@ def simulate_plan(
         0.0,
         min(discharge_limit_w, ASW12KH_T3_MAX_BATTERY_DISCHARGE_W),
     )
+    ordered_slots = sorted(slots, key=lambda item: item.timestamp)
     step_hours = config.step_minutes / 60.0
     capacity_wh = config.battery_capacity_kwh * 1000.0
     minimum_wh = capacity_wh * config.reserve_soc_percent / 100.0
     maximum_wh = capacity_wh * config.maximum_soc_percent / 100.0
-    stored_wh = min(
+    initial_wh = min(
         maximum_wh,
         max(minimum_wh, capacity_wh * initial_soc_percent / 100.0),
     )
     baseline_minimum_wh = capacity_wh * max(
-        0.0, min(100.0, baseline_policy.minimum_soc_percent)
+        0.0,
+        min(100.0, baseline_policy.minimum_soc_percent),
     ) / 100.0
     baseline_maximum_wh = capacity_wh * max(
         baseline_policy.minimum_soc_percent,
         min(100.0, baseline_policy.maximum_soc_percent),
     ) / 100.0
-    baseline_stored_wh = min(
+    baseline_initial_wh = min(
         baseline_maximum_wh,
         max(
             baseline_minimum_wh,
             capacity_wh * initial_soc_percent / 100.0,
         ),
     )
-    baseline_import_kwh = baseline_export_kwh = 0.0
-    optimized_import_kwh = optimized_export_kwh = 0.0
-    recommendations: list[Recommendation] = []
-    baseline_flows: list[tuple[dt.datetime, float, float]] = []
-    optimized_flows: list[tuple[dt.datetime, float, float]] = []
-    plan_feasible = True
-    cumulative_load_uncertainty_wh = 0.0
 
-    future_import_prices = [
-        tariff.quote(slot.timestamp).import_price_per_kwh for slot in slots
-    ]
-    for index, slot in enumerate(slots):
-        quote = tariff.quote(slot.timestamp)
-        natural_grid = slot.load_w - slot.pv_w
-        baseline_battery_power = 0.0
-        if baseline_policy.mode == "charge":
-            room_input_w = max(
-                0.0,
-                (baseline_maximum_wh - baseline_stored_wh)
-                / max(step_hours * config.charge_efficiency, 0.001),
-            )
-            baseline_battery_power = -min(
-                abs(baseline_policy.requested_power_w),
-                charge_limit_w,
-                room_input_w,
-            )
-        elif baseline_policy.mode == "discharge":
-            available_output_w = max(
-                0.0,
-                (baseline_stored_wh - baseline_minimum_wh)
-                * config.discharge_efficiency
-                / max(step_hours, 0.001),
-            )
-            baseline_battery_power = min(
-                abs(baseline_policy.requested_power_w),
-                discharge_limit_w,
-                available_output_w,
-            )
-        baseline_stored_wh += (
-            max(0.0, -baseline_battery_power)
-            * step_hours
-            * config.charge_efficiency
-            - max(0.0, baseline_battery_power)
-            * step_hours
-            / config.discharge_efficiency
-        )
-        baseline_stored_wh = min(
-            baseline_maximum_wh,
-            max(baseline_minimum_wh, baseline_stored_wh),
-        )
-        baseline_grid = natural_grid - baseline_battery_power
-        baseline_import = max(0.0, baseline_grid) * step_hours / 1000.0
-        baseline_export = max(0.0, -baseline_grid) * step_hours / 1000.0
-        baseline_import_kwh += baseline_import
-        baseline_export_kwh += baseline_export
-        baseline_flows.append(
-            (slot.timestamp, baseline_import, baseline_export)
-        )
-
-        charge_w = 0.0
-        discharge_w = 0.0
-        explanations: list[str] = []
-        room_input_w = max(
-            0.0,
-            (maximum_wh - stored_wh)
-            / max(step_hours * config.charge_efficiency, 0.001),
-        )
-        available_output_w = max(
-            0.0,
-            (stored_wh - minimum_wh)
-            * config.discharge_efficiency
-            / max(step_hours, 0.001),
-        )
-        if natural_grid < 0:
-            charge_w = min(
-                -natural_grid,
-                charge_limit_w,
-                room_input_w,
-            )
-            if charge_w:
-                explanations.append(
-                    "charge from forecast PV surplus to maximise self-consumption"
-                )
-        elif natural_grid > 0:
-            discharge_w = min(
-                natural_grid,
-                discharge_limit_w,
-                available_output_w,
-            )
-            if discharge_w:
-                explanations.append(
-                    "discharge to serve forecast site load before grid import"
-                )
-
-        later_peak = max(future_import_prices[index + 1 :], default=0.0)
-        if (
-            natural_grid >= 0
-            and quote.import_price_per_kwh
-            + config.minimum_arbitrage_margin_per_kwh
-            < later_peak
-            and room_input_w > charge_w
+    def baseline_dispatch(slot: ForecastSlot, stored_wh: float) -> Dispatch:
+        natural_grid_w = slot.load_w - slot.pv_w
+        if baseline_policy.mode in (
+            "custom_self_consumption",
+            "self_consumption",
         ):
-            grid_charge = min(
-                charge_limit_w - charge_w,
-                room_input_w - charge_w,
-                config.site_import_limit_watts - natural_grid,
+            return _self_consumption_dispatch(
+                natural_grid_w=natural_grid_w,
+                stored_wh=stored_wh,
+                minimum_wh=baseline_minimum_wh,
+                maximum_wh=baseline_maximum_wh,
+                charge_limit_w=charge_limit_w,
+                discharge_limit_w=discharge_limit_w,
+                step_hours=step_hours,
+                charge_efficiency=config.charge_efficiency,
+                discharge_efficiency=config.discharge_efficiency,
             )
-            if grid_charge > 0:
-                charge_w += grid_charge
-                discharge_w = 0.0
-                explanations.append(
-                    "charge before a later higher import-price period"
+        if baseline_policy.mode == "reserve":
+            if natural_grid_w < 0:
+                return _self_consumption_dispatch(
+                    natural_grid_w=natural_grid_w,
+                    stored_wh=stored_wh,
+                    minimum_wh=baseline_minimum_wh,
+                    maximum_wh=baseline_maximum_wh,
+                    charge_limit_w=charge_limit_w,
+                    discharge_limit_w=0.0,
+                    step_hours=step_hours,
+                    charge_efficiency=config.charge_efficiency,
+                    discharge_efficiency=config.discharge_efficiency,
                 )
-
-        battery_power = discharge_w - charge_w
-        expected_grid = natural_grid - battery_power
-        if expected_grid > config.site_import_limit_watts:
-            extra = min(
-                expected_grid - config.site_import_limit_watts,
-                discharge_limit_w - discharge_w,
-                available_output_w - discharge_w,
+            return Dispatch(
+                "reserve",
+                "none",
+                0.0,
+                0.0,
+                natural_grid_w,
+                stored_wh,
+                ("native reserve mode retains battery energy while the grid is available",),
             )
-            discharge_w += max(0.0, extra)
-            battery_power = discharge_w - charge_w
-            expected_grid = natural_grid - battery_power
-            explanations.append("discharge constrained by configured site import limit")
-        if expected_grid < -config.site_export_limit_watts:
-            extra = min(
-                -config.site_export_limit_watts - expected_grid,
-                charge_limit_w - charge_w,
-                room_input_w - charge_w,
+        if baseline_policy.mode in ("charge_window", "discharge_window"):
+            return _fixed_window_dispatch(
+                direction=(
+                    "charge"
+                    if baseline_policy.mode == "charge_window"
+                    else "discharge"
+                ),
+                command_power_w=baseline_policy.requested_power_w,
+                natural_grid_w=natural_grid_w,
+                stored_wh=stored_wh,
+                minimum_wh=baseline_minimum_wh,
+                maximum_wh=baseline_maximum_wh,
+                charge_limit_w=charge_limit_w,
+                discharge_limit_w=discharge_limit_w,
+                step_hours=step_hours,
+                charge_efficiency=config.charge_efficiency,
+                discharge_efficiency=config.discharge_efficiency,
             )
-            charge_w += max(0.0, extra)
-            battery_power = discharge_w - charge_w
-            expected_grid = natural_grid - battery_power
-            explanations.append("charge constrained by configured site export limit")
-        feasible = (
-            expected_grid <= config.site_import_limit_watts + 0.001
-            and expected_grid >= -config.site_export_limit_watts - 0.001
+        return Dispatch(
+            "hold",
+            "none",
+            0.0,
+            0.0,
+            natural_grid_w,
+            stored_wh,
+            ("native mode is unknown, so the baseline does not assume battery movement",),
         )
-        if not feasible:
-            plan_feasible = False
-            explanations.append(
-                "forecast site flow exceeds the controllable site boundary"
-            )
 
-        stored_wh += (
-            charge_w * step_hours * config.charge_efficiency
-            - discharge_w
-            * step_hours
-            / config.discharge_efficiency
+    baseline_stored_wh = baseline_initial_wh
+    baseline_dispatches: list[Dispatch] = []
+    baseline_flows: list[tuple[dt.datetime, float, float]] = []
+    for slot in ordered_slots:
+        dispatched = baseline_dispatch(slot, baseline_stored_wh)
+        baseline_stored_wh = dispatched.stored_wh
+        baseline_dispatches.append(dispatched)
+        baseline_flows.append(
+            (
+                slot.timestamp,
+                max(0.0, dispatched.grid_power_w) * step_hours / 1000.0,
+                max(0.0, -dispatched.grid_power_w) * step_hours / 1000.0,
+            )
         )
-        stored_wh = min(maximum_wh, max(minimum_wh, stored_wh))
+
+    default_stored_wh = initial_wh
+    default_dispatches: list[Dispatch] = []
+    default_flows: list[tuple[dt.datetime, float, float]] = []
+    for slot in ordered_slots:
+        dispatched = _self_consumption_dispatch(
+            natural_grid_w=slot.load_w - slot.pv_w,
+            stored_wh=default_stored_wh,
+            minimum_wh=minimum_wh,
+            maximum_wh=maximum_wh,
+            charge_limit_w=charge_limit_w,
+            discharge_limit_w=discharge_limit_w,
+            step_hours=step_hours,
+            charge_efficiency=config.charge_efficiency,
+            discharge_efficiency=config.discharge_efficiency,
+        )
+        default_stored_wh = dispatched.stored_wh
+        default_dispatches.append(dispatched)
+        default_flows.append(
+            (
+                slot.timestamp,
+                max(0.0, dispatched.grid_power_w) * step_hours / 1000.0,
+                max(0.0, -dispatched.grid_power_w) * step_hours / 1000.0,
+            )
+        )
+
+    root = SearchNode(initial_wh, 0.0, 0.0, None, 0.0, 0, None, None)
+    nodes = [root]
+    energy_quantum_wh = max(100.0, capacity_wh * 0.005)
+    premium_quantum_kwh = 0.25
+    for slot in ordered_slots:
+        natural_grid_w = slot.load_w - slot.pv_w
+        candidates: dict[tuple[int, int], SearchNode] = {}
+        for node in nodes:
+            automatic = _self_consumption_dispatch(
+                natural_grid_w=natural_grid_w,
+                stored_wh=node.stored_wh,
+                minimum_wh=minimum_wh,
+                maximum_wh=maximum_wh,
+                charge_limit_w=charge_limit_w,
+                discharge_limit_w=discharge_limit_w,
+                step_hours=step_hours,
+                charge_efficiency=config.charge_efficiency,
+                discharge_efficiency=config.discharge_efficiency,
+            )
+            dispatches = [automatic]
+            charged = _fixed_window_dispatch(
+                direction="charge",
+                command_power_w=charge_limit_w,
+                natural_grid_w=natural_grid_w,
+                stored_wh=node.stored_wh,
+                minimum_wh=minimum_wh,
+                maximum_wh=maximum_wh,
+                charge_limit_w=charge_limit_w,
+                discharge_limit_w=discharge_limit_w,
+                step_hours=step_hours,
+                charge_efficiency=config.charge_efficiency,
+                discharge_efficiency=config.discharge_efficiency,
+            )
+            if (
+                charged.command_power_w > 0
+                and charged.grid_power_w > 0
+                and charged.grid_power_w <= config.site_import_limit_watts
+            ):
+                dispatches.append(charged)
+            discharged = _fixed_window_dispatch(
+                direction="discharge",
+                command_power_w=discharge_limit_w,
+                natural_grid_w=natural_grid_w,
+                stored_wh=node.stored_wh,
+                minimum_wh=minimum_wh,
+                maximum_wh=maximum_wh,
+                charge_limit_w=charge_limit_w,
+                discharge_limit_w=discharge_limit_w,
+                step_hours=step_hours,
+                charge_efficiency=config.charge_efficiency,
+                discharge_efficiency=config.discharge_efficiency,
+            )
+            if (
+                discharged.command_power_w > 0
+                and discharged.grid_power_w < 0
+                and discharged.grid_power_w >= -config.site_export_limit_watts
+                and tariff.quote(slot.timestamp).export_price_per_kwh > 0
+            ):
+                dispatches.append(discharged)
+
+            for dispatched in dispatches:
+                financial, premium_date, premium_used = _slot_financial_cost(
+                    tariff,
+                    slot.timestamp,
+                    dispatched.grid_power_w,
+                    step_hours,
+                    node.premium_date,
+                    node.premium_exported_kwh,
+                )
+                fixed = dispatched.window_mode != "none"
+                intervention = (
+                    dispatched.command_power_w
+                    * step_hours
+                    / 1000.0
+                    * config.minimum_arbitrage_margin_per_kwh
+                    / 2.0
+                    if fixed
+                    else 0.0
+                )
+                candidate = SearchNode(
+                    dispatched.stored_wh,
+                    node.objective_cost + financial + intervention,
+                    node.intervention_penalty + intervention,
+                    premium_date,
+                    premium_used,
+                    node.fixed_intervals + int(fixed),
+                    node,
+                    dispatched,
+                )
+                key = (
+                    round((dispatched.stored_wh - minimum_wh) / energy_quantum_wh),
+                    round(premium_used / premium_quantum_kwh),
+                )
+                current = candidates.get(key)
+                if current is None or (
+                    candidate.objective_cost,
+                    candidate.fixed_intervals,
+                ) < (
+                    current.objective_cost,
+                    current.fixed_intervals,
+                ):
+                    candidates[key] = candidate
+        nodes = list(candidates.values())
+
+    terminal_floor = min(baseline_stored_wh, maximum_wh) - energy_quantum_wh
+    terminal_nodes = [node for node in nodes if node.stored_wh >= terminal_floor]
+    if not terminal_nodes:
+        terminal_nodes = nodes
+
+    def reconstruct(node: SearchNode) -> list[Dispatch]:
+        result: list[Dispatch] = []
+        while node.dispatch is not None:
+            result.append(node.dispatch)
+            if node.parent is None:
+                break
+            node = node.parent
+        return list(reversed(result))
+
+    def exact_objective(node: SearchNode) -> tuple[float, int, float]:
+        dispatches = reconstruct(node)
+        flows = [
+            (
+                slot.timestamp,
+                max(0.0, dispatched.grid_power_w) * step_hours / 1000.0,
+                max(0.0, -dispatched.grid_power_w) * step_hours / 1000.0,
+            )
+            for slot, dispatched in zip(ordered_slots, dispatches)
+        ]
+        return (
+            _bill(tariff, flows, config.step_minutes)
+            + node.intervention_penalty,
+            node.fixed_intervals,
+            -node.stored_wh,
+        )
+
+    winner = min(terminal_nodes, key=exact_objective)
+    optimized_dispatches = reconstruct(winner)
+    optimized_flows = [
+        (
+            slot.timestamp,
+            max(0.0, dispatched.grid_power_w) * step_hours / 1000.0,
+            max(0.0, -dispatched.grid_power_w) * step_hours / 1000.0,
+        )
+        for slot, dispatched in zip(ordered_slots, optimized_dispatches)
+    ]
+    baseline_cost = _bill(tariff, baseline_flows, config.step_minutes)
+    optimized_cost = _bill(tariff, optimized_flows, config.step_minutes)
+    terminal_import_price = max(
+        (tariff.quote(slot.timestamp).import_price_per_kwh for slot in ordered_slots),
+        default=0.0,
+    )
+
+    def terminal_adjustment(dispatches: list[Dispatch]) -> float:
+        ending_wh = dispatches[-1].stored_wh if dispatches else initial_wh
+        shortfall_wh = max(0.0, baseline_stored_wh - ending_wh)
+        return (
+            shortfall_wh
+            / 1000.0
+            * config.discharge_efficiency
+            * terminal_import_price
+        )
+
+    energy_adjustment = terminal_adjustment(optimized_dispatches)
+    estimated_improvement = baseline_cost - optimized_cost - energy_adjustment
+    if estimated_improvement <= 0.000001 and any(
+        item.window_mode != "none" for item in optimized_dispatches
+    ):
+        optimized_dispatches = default_dispatches
+        optimized_flows = default_flows
+        optimized_cost = _bill(tariff, optimized_flows, config.step_minutes)
+        energy_adjustment = terminal_adjustment(optimized_dispatches)
+        estimated_improvement = baseline_cost - optimized_cost - energy_adjustment
+
+    cumulative_load_uncertainty_wh = 0.0
+    recommendations: list[Recommendation] = []
+    for slot, baseline, optimized in zip(
+        ordered_slots,
+        baseline_dispatches,
+        optimized_dispatches,
+    ):
         load_lower = slot.load_w if slot.load_lower_w is None else slot.load_lower_w
         load_upper = slot.load_w if slot.load_upper_w is None else slot.load_upper_w
         cumulative_load_uncertainty_wh += max(
             abs(slot.load_w - load_lower),
             abs(load_upper - slot.load_w),
         ) * step_hours / min(config.charge_efficiency, config.discharge_efficiency)
-        expected_soc = stored_wh / capacity_wh * 100.0
+        expected_soc = optimized.stored_wh / capacity_wh * 100.0
         soc_uncertainty = cumulative_load_uncertainty_wh / capacity_wh * 100.0
-        expected_soc_lower = max(
-            config.reserve_soc_percent,
-            expected_soc - soc_uncertainty,
-        )
-        expected_soc_upper = min(
-            config.maximum_soc_percent,
-            expected_soc + soc_uncertainty,
-        )
-        optimized_import = max(0.0, expected_grid) * step_hours / 1000.0
-        optimized_export = max(0.0, -expected_grid) * step_hours / 1000.0
-        optimized_import_kwh += optimized_import
-        optimized_export_kwh += optimized_export
-        optimized_flows.append(
-            (slot.timestamp, optimized_import, optimized_export)
-        )
-        action = "discharge" if battery_power > 0 else "charge" if battery_power < 0 else "hold"
-        if not explanations:
-            explanations.append("hold: no beneficial or constraint-driven action")
-        explanations.extend(
+        quote = tariff.quote(slot.timestamp)
+        explanations = optimized.explanation + (
+            f"forecast load {slot.load_w:.0f} W and PV {slot.pv_w:.0f} W",
             (
-                f"forecast load {slot.load_w:.0f} W and PV {slot.pv_w:.0f} W",
-                (
-                    f"tariff import ${quote.import_price_per_kwh:.3f}/kWh "
-                    f"and export ${quote.export_price_per_kwh:.3f}/kWh"
-                ),
-                (
-                    f"SOC kept within {config.reserve_soc_percent:.1f}%–"
-                    f"{config.maximum_soc_percent:.1f}%"
-                ),
-            )
+                f"tariff import ${quote.import_price_per_kwh:.3f}/kWh "
+                f"and export ${quote.export_price_per_kwh:.3f}/kWh"
+            ),
+            (
+                f"SOC kept within {config.reserve_soc_percent:.1f}%–"
+                f"{config.maximum_soc_percent:.1f}%"
+            ),
         )
         recommendations.append(
             Recommendation(
                 slot.timestamp.astimezone(dt.timezone.utc).isoformat(),
-                action,
+                optimized.action,
+                "custom",
+                optimized.window_mode,
+                round(optimized.command_power_w, 3),
                 round(slot.load_w, 3),
                 round(slot.pv_w, 3),
-                round(
-                    slot.pv_w if slot.base_pv_w is None else slot.base_pv_w,
-                    3,
-                ),
-                round(
-                    slot.load_w
-                    if slot.load_lower_w is None
-                    else slot.load_lower_w,
-                    3,
-                ),
-                round(
-                    slot.load_w
-                    if slot.load_upper_w is None
-                    else slot.load_upper_w,
-                    3,
-                ),
+                round(slot.pv_w if slot.base_pv_w is None else slot.base_pv_w, 3),
+                round(load_lower, 3),
+                round(load_upper, 3),
                 slot.load_samples,
                 slot.weather,
-                round(baseline_grid, 3),
-                round(baseline_battery_power, 3),
-                round(baseline_stored_wh / capacity_wh * 100.0, 3),
-                round(battery_power, 3),
-                round(expected_grid, 3),
+                round(baseline.grid_power_w, 3),
+                round(baseline.battery_power_w, 3),
+                round(baseline.stored_wh / capacity_wh * 100.0, 3),
+                round(optimized.battery_power_w, 3),
+                round(optimized.grid_power_w, 3),
                 round(expected_soc, 3),
-                round(expected_soc_lower, 3),
-                round(expected_soc_upper, 3),
+                round(max(config.reserve_soc_percent, expected_soc - soc_uncertainty), 3),
+                round(min(config.maximum_soc_percent, expected_soc + soc_uncertainty), 3),
                 quote.import_price_per_kwh,
                 quote.export_price_per_kwh,
-                tuple(explanations),
+                explanations,
                 {
                     "charge_limit_w": charge_limit_w,
                     "discharge_limit_w": discharge_limit_w,
@@ -442,42 +734,96 @@ def simulate_plan(
                     "site_export_limit_w": config.site_export_limit_watts,
                     "reserve_soc_percent": config.reserve_soc_percent,
                     "maximum_soc_percent": config.maximum_soc_percent,
-                    "manufacturer_max_charge_w": (
-                        ASW12KH_T3_MAX_BATTERY_CHARGE_W
-                    ),
-                    "manufacturer_max_discharge_w": (
-                        ASW12KH_T3_MAX_BATTERY_DISCHARGE_W
-                    ),
+                    "manufacturer_max_charge_w": ASW12KH_T3_MAX_BATTERY_CHARGE_W,
+                    "manufacturer_max_discharge_w": ASW12KH_T3_MAX_BATTERY_DISCHARGE_W,
                 },
-                feasible,
+                (
+                    optimized.grid_power_w <= config.site_import_limit_watts + 0.001
+                    and optimized.grid_power_w >= -config.site_export_limit_watts - 0.001
+                ),
             )
         )
 
-    baseline_cost = _bill(tariff, baseline_flows, config.step_minutes)
-    optimized_cost = _bill(tariff, optimized_flows, config.step_minutes)
+    baseline_import = sum(item[1] for item in baseline_flows)
+    baseline_export = sum(item[2] for item in baseline_flows)
+    optimized_import = sum(item[1] for item in optimized_flows)
+    optimized_export = sum(item[2] for item in optimized_flows)
+    windows = []
+
+    def interval_end(timestamp: str) -> str:
+        return (
+            dt.datetime.fromisoformat(timestamp)
+            + dt.timedelta(minutes=config.step_minutes)
+        ).isoformat()
+
+    for index, recommendation in enumerate(recommendations):
+        if recommendation.window_mode == "none":
+            continue
+        if (
+            windows
+            and windows[-1]["last_index"] == index - 1
+            and windows[-1]["mode"] == recommendation.window_mode
+            and windows[-1]["command_power_w"] == recommendation.command_power_w
+        ):
+            windows[-1]["intervals"] += 1
+            windows[-1]["ends_at"] = interval_end(recommendation.timestamp)
+            windows[-1]["last_index"] = index
+        else:
+            windows.append(
+                {
+                    "mode": recommendation.window_mode,
+                    "command_power_w": recommendation.command_power_w,
+                    "starts_at": recommendation.timestamp,
+                    "ends_at": interval_end(recommendation.timestamp),
+                    "intervals": 1,
+                    "last_index": index,
+                }
+            )
+    for window in windows:
+        window.pop("last_index")
+    feasible = all(item.feasible for item in recommendations)
     return {
         "recommendations": [asdict(item) for item in recommendations],
-        "feasible": plan_feasible,
+        "scheduled_windows": windows,
+        "feasible": feasible,
         "simulation": {
             "baseline": {
                 "cost": round(baseline_cost, 6),
-                "import_kwh": round(baseline_import_kwh, 6),
-                "export_kwh": round(baseline_export_kwh, 6),
+                "import_kwh": round(baseline_import, 6),
+                "export_kwh": round(baseline_export, 6),
+                "ending_soc_percent": round(baseline_stored_wh / capacity_wh * 100.0, 3),
                 "policy": asdict(baseline_policy),
             },
             "optimized": {
                 "cost": round(optimized_cost, 6),
-                "import_kwh": round(optimized_import_kwh, 6),
-                "export_kwh": round(optimized_export_kwh, 6),
+                "import_kwh": round(optimized_import, 6),
+                "export_kwh": round(optimized_export, 6),
+                "ending_soc_percent": round(
+                    optimized_dispatches[-1].stored_wh / capacity_wh * 100.0
+                    if optimized_dispatches
+                    else initial_soc_percent,
+                    3,
+                ),
             },
-            "estimated_cost_improvement": round(
-                baseline_cost - optimized_cost, 6
-            ),
+            "terminal_energy_adjustment": round(energy_adjustment, 6),
+            "estimated_cost_improvement": round(estimated_improvement, 6),
             "model": (
-                "deterministic shadow comparison against continuation of the "
-                "current native inverter command; includes ZEROHERO eligibility "
-                "and Super Export cap; excludes equal daily supply charge"
+                "complete-horizon Custom-mode simulation: native self-consumption outside windows; "
+                "fixed battery power only for grid charge or export discharge; includes efficiency, "
+                "SOC/site limits, ZEROHERO eligibility and the Super Export cap"
             ),
+        },
+        "control_strategy": {
+            "preferred_mode": "custom",
+            "default_window_mode": "none",
+            "default_behavior": "inverter-managed self-consumption",
+            "fixed_windows_only_for": ["grid_charge", "export_discharge"],
+            "site_load_added_to_fixed_discharge_command": False,
+            "configured_soc_bounds_percent": {
+                "minimum": config.reserve_soc_percent,
+                "maximum": config.maximum_soc_percent,
+            },
+            "soc_bound_write_required_if_native_differs": True,
         },
         "hardware_limits": {
             "model": "ASW12kH-T3",
@@ -485,12 +831,10 @@ def simulate_plan(
             "manufacturer_max_discharge_w": ASW12KH_T3_MAX_BATTERY_DISCHARGE_W,
             "planning_interval_seconds": config.step_minutes * 60,
             "basis": (
-                "manufacturer battery charge/discharge rating, further capped "
-                "by configured and live BMS voltage×current limits"
+                "12 kW inverter battery rating, further capped by configured limits and live BMS voltage×current"
             ),
             "excluded_limit": (
-                "24 kVA EPS overload rating is limited to 10 seconds and is "
-                "not used for battery dispatch planning"
+                "24 kVA EPS overload rating is limited to 10 seconds and is not used for dispatch"
             ),
         },
     }
@@ -561,6 +905,7 @@ class OptimisationWorker:
             "site.load_power",
         )
         input_names = required_names + (
+            "asw.control.run_mode",
             "asw.control.charge_discharge_state",
             "asw.control.power_command",
             "battery.limit.soc_lower",
@@ -632,10 +977,28 @@ class OptimisationWorker:
                         point["weather"]
                     )
         slots = []
-        for bucket, samples in sorted(pv_buckets.items()):
+        day_bounds: dict[dt.date, tuple[int, int]] = {}
+        for bucket in pv_buckets:
+            local_date = dt.datetime.fromtimestamp(
+                bucket * step_seconds,
+                tz=dt.timezone.utc,
+            ).astimezone(self.tariff.timezone).date()
+            lower, upper = day_bounds.get(local_date, (bucket, bucket))
+            day_bounds[local_date] = (min(lower, bucket), max(upper, bucket))
+        missing_daylight_buckets = 0
+        zero_filled_buckets = 0
+        for bucket in _planning_bucket_ids(now, cutoff, step_seconds):
             timestamp = dt.datetime.fromtimestamp(
                 bucket * step_seconds, tz=dt.timezone.utc
             )
+            samples = pv_buckets.get(bucket)
+            if not samples:
+                samples = [0.0]
+                zero_filled_buckets += 1
+                local_date = timestamp.astimezone(self.tariff.timezone).date()
+                bounds = day_bounds.get(local_date)
+                if bounds and bounds[0] <= bucket <= bounds[1]:
+                    missing_daylight_buckets += 1
             local = timestamp.astimezone(self.tariff.timezone)
             key = (local.weekday(), local.hour, local.minute // 15)
             load_bucket = load_profile.get(key)
@@ -662,8 +1025,12 @@ class OptimisationWorker:
                     timestamp,
                     forecast_load,
                     sum(samples) / len(samples),
-                    sum(base_pv_buckets[bucket])
-                    / len(base_pv_buckets[bucket]),
+                    (
+                        sum(base_pv_buckets[bucket])
+                        / len(base_pv_buckets[bucket])
+                        if bucket in base_pv_buckets
+                        else 0.0
+                    ),
                     forecast_load_lower,
                     forecast_load_upper,
                     load_bucket.samples if load_bucket else 0,
@@ -707,18 +1074,77 @@ class OptimisationWorker:
             discharge_limit_w=discharge_limit,
             native_baseline=native_baseline,
         )
+        load_quality = (
+            self.history.prediction_quality(
+                signal="site.load_power",
+                scenario="expected",
+                since=(now - dt.timedelta(days=30)).isoformat(),
+            )
+            if self.history is not None
+            else {"samples": 0, "days": 0}
+        )
+        load_profile_ready = bool(slots) and all(
+            slot.load_samples >= 4 for slot in slots
+        )
+        load_accuracy_ready = bool(
+            load_quality.get("days", 0) >= 14
+            and load_quality.get("samples", 0) >= 300
+        )
+        pv_control_ready = bool(
+            forecast.get("correction", {}).get("control_ready", False)
+        )
+        planning_quality_ready = bool(
+            pv_control_ready
+            and load_profile_ready
+            and load_accuracy_ready
+            and missing_daylight_buckets == 0
+        )
+        improvement = result["simulation"]["estimated_cost_improvement"]
+        status = (
+            "infeasible"
+            if not result["feasible"]
+            else "ready"
+            if planning_quality_ready and improvement > 0
+            else "no_change"
+            if planning_quality_ready
+            else "learning"
+        )
+        quality_reasons = []
+        if not pv_control_ready:
+            quality_reasons.append("PV accuracy gate has not passed")
+        if not load_profile_ready:
+            quality_reasons.append(
+                "load profile lacks four samples for one or more intervals"
+            )
+        if not load_accuracy_ready:
+            quality_reasons.append(
+                "load prediction accuracy lacks 14 days and 300 scored samples"
+            )
+        if missing_daylight_buckets:
+            quality_reasons.append(
+                f"PV provider has {missing_daylight_buckets} missing daylight intervals"
+            )
+        if improvement <= 0:
+            quality_reasons.append(
+                "no fixed-power window improves on Custom self-consumption"
+            )
         plan = {
             "generated_at": utc_now(),
             "mode": "shadow",
-            "status": "ready" if result["feasible"] else "infeasible",
+            "status": status,
+            "reason": "; ".join(quality_reasons) if quality_reasons else None,
             "inputs": inputs,
             "load_forecast": {
                 "method": (
-                    "historical weekday/15-minute robust distribution with current-load fallback"
+                    "hierarchical weekday/day-type/all-days 15-minute robust distribution with current-load fallback"
                     if load_profile
                     else "current-load persistence"
                 ),
                 "historical_buckets": len(load_profile),
+                "profile_ready": load_profile_ready,
+                "accuracy_ready": load_accuracy_ready,
+                "accuracy_samples": load_quality.get("samples", 0),
+                "accuracy_days": load_quality.get("days", 0),
                 "long_term_statistic": (
                     "median with 10th/90th percentile interval of retained "
                     "15-minute observations"
@@ -729,9 +1155,7 @@ class OptimisationWorker:
                 "short_term_decay_hours": 4,
             },
             "pv_forecast_quality": {
-                "control_ready": bool(
-                    forecast.get("correction", {}).get("control_ready", False)
-                ),
+                "control_ready": pv_control_ready,
                 "learning_state": forecast.get("correction", {}).get(
                     "quality", "unknown"
                 ),
@@ -743,6 +1167,17 @@ class OptimisationWorker:
                     "quality gate cannot enable hardware writes"
                 ),
             },
+            "timeline_quality": {
+                "complete": missing_daylight_buckets == 0,
+                "step_minutes": self.config.step_minutes,
+                "intervals": len(slots),
+                "night_intervals_filled_with_zero_pv": zero_filled_buckets,
+                "missing_daylight_intervals": missing_daylight_buckets,
+            },
+            "planning_quality": {
+                "control_ready": planning_quality_ready,
+                "reasons": quality_reasons,
+            },
             **result,
             "control_commands_sent": 0,
             "execution_available": False,
@@ -751,9 +1186,9 @@ class OptimisationWorker:
         self.runs += 1
         self.state.update_health(
             "optimisation",
-            status="ok",
+            status="ok" if status in ("ready", "no_change") else "degraded",
             mode="shadow",
-            reason=None,
+            reason=plan.get("reason"),
             plans_generated=self.runs,
             persistence_failures=self.persistence_failures,
             control_commands_sent=0,
@@ -886,7 +1321,7 @@ class OptimisationWorker:
             upper_field="forecast_load_upper_w",
             unit="W",
             model="fasttalk-load",
-            model_version="weekday-quarter-hour-v2",
+            model_version="hierarchical-quarter-hour-v3",
             scoreable=True,
         )
         for scenario, scoreable, soc_field, lower_field, upper_field in (
@@ -911,7 +1346,7 @@ class OptimisationWorker:
                 field=soc_field,
                 unit="%",
                 model="fasttalk-dispatch-simulator",
-                model_version="v2",
+                model_version="asw-custom-mode-v3",
                 scoreable=scoreable,
                 lower_field=lower_field,
                 upper_field=upper_field,
@@ -921,8 +1356,7 @@ class OptimisationWorker:
     def _native_baseline(
         inputs: dict[str, dict[str, Any] | None],
     ) -> NativeBaseline:
-        state = inputs.get("asw.control.charge_discharge_state")
-        command = inputs.get("asw.control.power_command")
+        run_mode = inputs.get("asw.control.run_mode")
         lower = inputs.get("battery.limit.soc_lower")
         upper = inputs.get("battery.limit.soc_upper")
         fresh = lambda value: bool(
@@ -930,15 +1364,12 @@ class OptimisationWorker:
             and value["quality"] == "good"
             and isinstance(value["value"], (int, float))
         )
-        if not fresh(state) or not fresh(command):
-            return NativeBaseline()
-        mode = {1: "hold", 2: "charge", 3: "discharge"}.get(
-            int(state["value"]),
-            "hold",
-        )
-        requested = (
-            abs(float(command["value"])) if mode in ("charge", "discharge") else 0.0
-        )
+        mode_value = int(run_mode["value"]) if fresh(run_mode) else 4
+        mode = {
+            2: "self_consumption",
+            3: "reserve",
+            4: "custom_self_consumption",
+        }.get(mode_value, "unknown")
         minimum = max(
             0.0,
             min(100.0, float(lower["value"]) if fresh(lower) else 0.0),
@@ -949,15 +1380,14 @@ class OptimisationWorker:
         )
         return NativeBaseline(
             mode=mode,
-            requested_power_w=requested,
+            requested_power_w=0.0,
             minimum_soc_percent=minimum,
             maximum_soc_percent=maximum,
-            source=(
-                "ASW Modbus registers 41152/41153 and native battery SOC bounds"
-            ),
+            source="ASW run-mode register 41104 and native battery SOC bounds",
             assumption=(
-                "the currently stored native mode and power command persist "
-                "until a native SOC bound; future native schedule changes are unknown"
+                "future native schedule windows are not exposed; Custom mode "
+                "therefore follows documented self-consumption behavior outside "
+                "known fixed-power windows"
             ),
         )
 
@@ -975,6 +1405,8 @@ class OptimisationWorker:
             limit=100000,
         )
         buckets: dict[tuple[int, int, int], list[float]] = {}
+        day_type_buckets: dict[tuple[bool, int, int], list[float]] = {}
+        clock_buckets: dict[tuple[int, int], list[float]] = {}
         for sample in samples:
             if (
                 not isinstance(sample["value"], (int, float))
@@ -986,17 +1418,42 @@ class OptimisationWorker:
                 timestamp = timestamp.replace(tzinfo=dt.timezone.utc)
             local = timestamp.astimezone(self.tariff.timezone)
             key = (local.weekday(), local.hour, local.minute // 15)
-            buckets.setdefault(key, []).append(max(0.0, float(sample["value"])))
-        return {
-            key: LoadBucket(
+            value = max(0.0, float(sample["value"]))
+            buckets.setdefault(key, []).append(value)
+            day_type_buckets.setdefault(
+                (local.weekday() < 5, local.hour, local.minute // 15),
+                [],
+            ).append(value)
+            clock_buckets.setdefault((local.hour, local.minute // 15), []).append(value)
+
+        def load_bucket(values: list[float], scope: str) -> LoadBucket:
+            return LoadBucket(
                 median_w=statistics.median(values),
                 lower_w=_quantile(values, 0.1),
                 upper_w=_quantile(values, 0.9),
                 samples=len(values),
+                scope=scope,
             )
+
+        result = {
+            key: load_bucket(values, "weekday")
             for key, values in buckets.items()
             if len(values) >= 4
         }
+        for weekday in range(7):
+            for (hour, quarter), clock_values in clock_buckets.items():
+                key = (weekday, hour, quarter)
+                if key in result:
+                    continue
+                day_type_values = day_type_buckets.get(
+                    (weekday < 5, hour, quarter),
+                    [],
+                )
+                if len(day_type_values) >= 4:
+                    result[key] = load_bucket(day_type_values, "day_type")
+                elif len(clock_values) >= 4:
+                    result[key] = load_bucket(clock_values, "all_days")
+        return result
 
     def _load_correction(
         self,

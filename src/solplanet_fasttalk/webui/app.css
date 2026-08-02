@@ -985,6 +985,9 @@ main {
 .schedule-action--charge { color: var(--battery); }
 .schedule-action--discharge { color: var(--plan); }
 .schedule-action--hold { color: var(--muted); }
+.schedule-action--grid_charge { color: var(--battery); }
+.schedule-action--export_discharge { color: var(--plan); }
+.schedule-action--self_consumption { color: var(--green-dark); }
 
 .workings-grid {
   display: grid;

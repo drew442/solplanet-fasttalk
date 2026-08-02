@@ -196,7 +196,7 @@ class ASWDecodeTests(unittest.TestCase):
         self.assertEqual(decoded["battery.soc"].value, 83)
 
     @unittest.skipUnless(ASW_CAPTURE.exists(), "private ASW capture unavailable")
-    def test_replays_all_daemon_groups_from_live_baseline(self):
+    def test_replays_original_daemon_groups_from_live_baseline(self):
         capture = json.loads(ASW_CAPTURE.read_text(encoding="utf-8"))
         reads = {
             read["name"]: read
@@ -215,6 +215,8 @@ class ASWDecodeTests(unittest.TestCase):
         }
         decoded = {}
         for group in (*IDENTITY_GROUPS, *POLL_GROUPS):
+            if group.name not in capture_names:
+                continue
             read = reads[capture_names[group.name]]
             registers = [entry["unsigned"] for entry in read["registers"]]
             decoded.update(
@@ -238,6 +240,19 @@ class ASWDecodeTests(unittest.TestCase):
             decoded["asw.smart_meter.active_power"],
             (int, float),
         )
+
+    def test_storage_mode_group_decodes_documented_custom_mode(self):
+        group = next(group for group in POLL_GROUPS if group.name == "storage_mode")
+        decoded = {
+            item.name: item.value
+            for item in decode_group(
+                group,
+                [2, 1, 4, 5],
+                "2026-01-01T00:00:00+00:00",
+                time.monotonic(),
+            )
+        }
+        self.assertEqual(decoded["asw.control.run_mode"], 4)
 
 
 class ConfigurationTests(unittest.TestCase):

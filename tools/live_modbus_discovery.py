@@ -294,6 +294,23 @@ ASW_PROFILE = Profile(
             ),
         ),
         ReadGroup(
+            "storage_mode",
+            0x03,
+            41102,
+            1101,
+            4,
+            (
+                f("storage_inverter_switch", 41102),
+                f("storage_machine_type", 41103),
+                f("storage_run_mode", 41104),
+                f("battery_manufacturer", 41105),
+            ),
+            note=(
+                "Read-only operating-mode evidence. Run mode 2 is self-consumption, "
+                "3 is reserve and 4 is Custom mode."
+            ),
+        ),
+        ReadGroup(
             "smart_meter_state",
             0x03,
             41108,

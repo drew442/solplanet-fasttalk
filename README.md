@@ -319,6 +319,10 @@ machine-readable permanent prohibitions, approval-gated plant controls and the
 risk assessment required before any physical write. The current daemon remains
 read-only and rejects every write function.
 
+The confirmed Custom-mode load-following and fixed-window power semantics used
+by the shadow planner are documented in
+[ASW battery operating modes](docs/asw-operating-modes.md).
+
 `solplanet-fasttalk` is an independent project and is not affiliated with or
 endorsed by Solplanet.
 

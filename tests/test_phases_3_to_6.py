@@ -32,6 +32,7 @@ from solplanet_fasttalk.optimisation import (
     NativeBaseline,
     OptimisationWorker,
     PlanStore,
+    _planning_bucket_ids,
     simulate_plan,
 )
 from solplanet_fasttalk.plugins import PluginRegistry
@@ -785,7 +786,7 @@ class Phase6Tests(unittest.TestCase):
             charge_limit_w=2500,
             discharge_limit_w=2000,
         )
-        self.assertGreater(
+        self.assertGreaterEqual(
             result["simulation"]["estimated_cost_improvement"], 0
         )
         for recommendation in result["recommendations"]:
@@ -837,7 +838,7 @@ class Phase6Tests(unittest.TestCase):
         self.assertEqual(plan["control_commands_sent"], 0)
         self.assertIn("battery.soc", plan["reason"])
 
-    def test_native_charge_command_is_the_no_change_baseline(self):
+    def test_custom_mode_without_window_is_self_consumption_baseline(self):
         tariff = ZeroHeroTariff(TariffConfig())
         config = OptimisationConfig(
             enabled=True,
@@ -847,8 +848,8 @@ class Phase6Tests(unittest.TestCase):
         )
         slot = ForecastSlot(
             dt.datetime(2026, 6, 1, 12, 0, tzinfo=ZoneInfo("Australia/Sydney")),
-            1000,
-            1000,
+            1500,
+            0,
         )
         result = simulate_plan(
             config,
@@ -858,25 +859,168 @@ class Phase6Tests(unittest.TestCase):
             charge_limit_w=50000,
             discharge_limit_w=50000,
             native_baseline=NativeBaseline(
-                mode="charge",
-                requested_power_w=12000,
+                mode="custom_self_consumption",
                 minimum_soc_percent=10,
                 maximum_soc_percent=100,
                 source="test",
-                assumption="persist",
+                assumption="no window",
             ),
         )
         recommendation = result["recommendations"][0]
-        self.assertEqual(recommendation["baseline_battery_power_w"], -12000)
-        self.assertEqual(recommendation["baseline_grid_power_w"], 12000)
+        self.assertEqual(recommendation["baseline_battery_power_w"], 1500)
+        self.assertEqual(recommendation["baseline_grid_power_w"], 0)
         self.assertEqual(
             recommendation["constraints"]["charge_limit_w"],
             12000,
         )
         self.assertEqual(
             result["simulation"]["baseline"]["policy"]["mode"],
-            "charge",
+            "custom_self_consumption",
         )
+
+    def test_fixed_discharge_window_does_not_add_site_load(self):
+        tariff = ZeroHeroTariff(TariffConfig())
+        config = OptimisationConfig(
+            enabled=True,
+            battery_capacity_kwh=10,
+            reserve_soc_percent=10,
+            maximum_soc_percent=90,
+        )
+        slot = ForecastSlot(
+            dt.datetime(2026, 6, 1, 18, 0, tzinfo=ZoneInfo("Australia/Sydney")),
+            1500,
+            0,
+        )
+        result = simulate_plan(
+            config,
+            tariff,
+            [slot],
+            initial_soc_percent=50,
+            charge_limit_w=12000,
+            discharge_limit_w=12000,
+            native_baseline=NativeBaseline(
+                mode="discharge_window",
+                requested_power_w=1000,
+                minimum_soc_percent=10,
+                maximum_soc_percent=100,
+                source="test",
+                assumption="fixed power",
+            ),
+        )
+        recommendation = result["recommendations"][0]
+        self.assertEqual(recommendation["baseline_battery_power_w"], 1000)
+        self.assertEqual(recommendation["baseline_grid_power_w"], 500)
+
+    def test_fixed_charge_window_keeps_site_load_separate(self):
+        tariff = ZeroHeroTariff(TariffConfig())
+        config = OptimisationConfig(
+            enabled=True,
+            battery_capacity_kwh=10,
+            reserve_soc_percent=10,
+            maximum_soc_percent=90,
+        )
+        slot = ForecastSlot(
+            dt.datetime(2026, 6, 1, 11, 0, tzinfo=ZoneInfo("Australia/Sydney")),
+            1500,
+            0,
+        )
+        result = simulate_plan(
+            config,
+            tariff,
+            [slot],
+            initial_soc_percent=50,
+            charge_limit_w=12000,
+            discharge_limit_w=12000,
+            native_baseline=NativeBaseline(
+                mode="charge_window",
+                requested_power_w=1000,
+                minimum_soc_percent=10,
+                maximum_soc_percent=100,
+                source="test",
+                assumption="fixed power",
+            ),
+        )
+        recommendation = result["recommendations"][0]
+        self.assertEqual(recommendation["baseline_battery_power_w"], -1000)
+        self.assertEqual(recommendation["baseline_grid_power_w"], 2500)
+
+    def test_grid_charge_and_export_windows_are_horizon_optimized(self):
+        tariff = ZeroHeroTariff(TariffConfig())
+        config = OptimisationConfig(
+            enabled=True,
+            battery_capacity_kwh=10,
+            reserve_soc_percent=10,
+            maximum_soc_percent=90,
+            max_charge_watts=3000,
+            max_discharge_watts=3000,
+            site_import_limit_watts=6000,
+            site_export_limit_watts=6000,
+        )
+        timezone = ZoneInfo("Australia/Sydney")
+        result = simulate_plan(
+            config,
+            tariff,
+            [
+                ForecastSlot(dt.datetime(2026, 6, 1, 11, 0, tzinfo=timezone), 0, 0),
+                ForecastSlot(dt.datetime(2026, 6, 1, 18, 0, tzinfo=timezone), 1000, 0),
+            ],
+            initial_soc_percent=20,
+            charge_limit_w=3000,
+            discharge_limit_w=3000,
+        )
+        self.assertGreater(result["simulation"]["estimated_cost_improvement"], 0)
+        self.assertEqual(
+            [item["action"] for item in result["recommendations"]],
+            ["grid_charge", "export_discharge"],
+        )
+        self.assertEqual(
+            result["recommendations"][1]["expected_grid_power_w"],
+            -2000,
+        )
+        self.assertEqual(
+            result["scheduled_windows"][0]["ends_at"],
+            "2026-06-01T01:15:00+00:00",
+        )
+
+    def test_planning_timeline_has_no_overnight_gap(self):
+        timezone = ZoneInfo("Australia/Sydney")
+        now = dt.datetime(2026, 8, 2, 17, 15, tzinfo=timezone)
+        cutoff = dt.datetime(2026, 8, 3, 6, 30, tzinfo=timezone)
+        buckets = list(_planning_bucket_ids(now, cutoff, 15 * 60))
+        self.assertEqual(len(buckets), 54)
+        self.assertTrue(all(right - left == 1 for left, right in zip(buckets, buckets[1:])))
+
+    def test_same_price_intervals_do_not_charge_discharge_sawtooth(self):
+        timezone = ZoneInfo("Australia/Sydney")
+        slots = [
+            ForecastSlot(
+                dt.datetime(2026, 8, 3, 6, 30, tzinfo=timezone)
+                + dt.timedelta(minutes=15 * index),
+                1500,
+                0,
+            )
+            for index in range(12)
+        ]
+        result = simulate_plan(
+            OptimisationConfig(
+                enabled=True,
+                battery_capacity_kwh=10,
+                reserve_soc_percent=10,
+                maximum_soc_percent=90,
+                max_charge_watts=3000,
+                max_discharge_watts=3000,
+            ),
+            ZeroHeroTariff(TariffConfig()),
+            slots,
+            initial_soc_percent=80,
+            charge_limit_w=3000,
+            discharge_limit_w=3000,
+        )
+        self.assertEqual(
+            {item["action"] for item in result["recommendations"]},
+            {"self_consumption"},
+        )
+        self.assertEqual(result["scheduled_windows"], [])
 
     def test_plan_history_persists_summary_and_full_workings(self):
         with tempfile.TemporaryDirectory() as directory:

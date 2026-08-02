@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "solplanet-fasttalk"
-version = "0.6.2"
+version = "0.7.0"
 description = "Local-first monitoring and control daemon for Solplanet PV and ESS plants"
 readme = "README.md"
 requires-python = ">=3.11"

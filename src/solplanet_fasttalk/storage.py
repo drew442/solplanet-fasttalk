@@ -171,6 +171,7 @@ MODEL_TRAINING_SIGNALS = (
     "battery.limit.discharge_current",
     "battery.limit.soc_lower",
     "battery.limit.soc_upper",
+    "asw.control.run_mode",
     "asw.control.charge_discharge_state",
     "asw.control.power_command",
 )

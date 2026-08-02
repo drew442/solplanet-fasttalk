@@ -258,7 +258,11 @@ function currentRecommendation(plan) {
 function renderRecommendation() {
   const plan = state.snapshot?.plan;
   const recommendation = currentRecommendation(plan);
-  setChip("planStatus", title(plan?.status || "waiting"), plan?.status === "ready" ? "shadow" : "degraded");
+  setChip(
+    "planStatus",
+    title(plan?.status || "waiting"),
+    ["ready", "no_change"].includes(plan?.status) ? "shadow" : "degraded",
+  );
 
   if (!recommendation) {
     setText("actionIcon", "—");
@@ -273,12 +277,27 @@ function renderRecommendation() {
     return;
   }
 
-  const action = recommendation.action || "hold";
+  const action = recommendation.action || "self_consumption";
   const battery = number(recommendation.battery_power_w);
-  const icons = { charge: "↓", discharge: "↑", hold: "—" };
+  const icons = {
+    grid_charge: "↓",
+    export_discharge: "↑",
+    self_consumption: "↔",
+    reserve: "—",
+    hold: "—",
+  };
   setText("actionIcon", icons[action] || "—");
   setText("actionTime", `${formatTime(recommendation.timestamp, true)} recommendation`);
-  setText("actionTitle", action === "hold" ? "Hold battery" : `${title(action)} at ${formatPower(Math.abs(battery))}`);
+  setText(
+    "actionTitle",
+    action === "self_consumption"
+      ? "Custom self-consumption · no active window"
+      : action === "grid_charge"
+        ? `Grid-charge window at ${formatPower(recommendation.command_power_w)}`
+        : action === "export_discharge"
+          ? `Export-discharge window at ${formatPower(recommendation.command_power_w)}`
+          : title(action),
+  );
   setText(
     "actionSummary",
     `Forecast load ${formatPower(recommendation.forecast_load_w)}, PV ${formatPower(recommendation.forecast_pv_w)}.`,
@@ -296,7 +315,7 @@ function renderRecommendation() {
   setText(
     "baselinePolicy",
     policy
-      ? `No-change baseline: native ${policy.mode} at ${formatPower(policy.requested_power_w)} until ${formatPercent(policy.minimum_soc_percent)}–${formatPercent(policy.maximum_soc_percent)} bounds.`
+      ? `No-change baseline: ${title(policy.mode)} within ${formatPercent(policy.minimum_soc_percent)}–${formatPercent(policy.maximum_soc_percent)} native SOC bounds. ${policy.assumption || ""}`
       : "No-change baseline: native inverter mode unavailable.",
   );
 }
@@ -331,7 +350,7 @@ function renderWorkings() {
   setText(
     "forecastStep",
     forecast.status === "ok"
-      ? `${forecast.points?.length || 0} PV points combined across ${forecast.planes?.length || 0} configured planes; ${plan.load_forecast?.method || "load model pending"}.`
+      ? `${plan.timeline_quality?.intervals || 0} complete ${plan.timeline_quality?.step_minutes || 15}-minute planning intervals; nighttime PV is explicitly zero; ${plan.load_forecast?.method || "load model pending"}.`
       : `PV forecast is ${forecast.status || "unavailable"}; optimiser cannot safely build a schedule.`,
   );
   const current = currentRecommendation(plan);
@@ -345,7 +364,7 @@ function renderWorkings() {
   setText(
     "recommendStep",
     current
-      ? `${title(current.action)} is feasible: ${current.feasible ? "yes" : "no"}. This remains a read-only shadow recommendation.`
+      ? `${title(current.action)} uses Custom mode with ${current.window_mode === "none" ? "no fixed-power window" : `a fixed ${current.window_mode} window`}; feasible: ${current.feasible ? "yes" : "no"}. This remains read-only.`
       : plan.reason || "No executable control path is present.",
   );
   setChip(

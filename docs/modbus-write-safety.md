@@ -166,6 +166,15 @@ The likely minimum ESS control surface is `41152–41155`, possibly combined
 with `41104`. The target register, persistence, valid range, sign, atomicity and
 failure behaviour must still be proven for the exact ASW model and firmware.
 
+The intended control strategy does not use a fixed window to follow ordinary
+site load. Custom mode with no active schedule is preferred because the ASW
+then performs native self-consumption and dynamically matches the load. A
+fixed-power charge window is reserved for deliberate grid charging; a
+fixed-power discharge window is reserved for deliberate grid export. The fixed
+command is battery power, not net grid power, so site load and PV forecast error
+directly affect resulting import/export. See
+[ASW battery operating modes](asw-operating-modes.md).
+
 ### Solis controls
 
 | Address/function | Intended use | Principal hazards |

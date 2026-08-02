@@ -148,6 +148,8 @@ The successful ASW baseline captures:
   current limits for the three parallel Ai-HB G2 stacks;
 - the documented per-phase grid values;
 - smart-meter online state and current smart-meter power; and
+- storage switch, storage-machine type, high-level run mode and battery
+  manufacturer from documented holding registers 41102–41105; and
 - the configured charge/discharge state and limits, using reads only.
 
 The live firmware differs from the V2.1.4 register document in several places.

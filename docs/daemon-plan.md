@@ -282,7 +282,11 @@ Acceptance:
 Deliver:
 
 - short-horizon plant forecast;
+- complete day/night interval coverage even when the PV provider omits
+  zero-production nighttime points;
 - self-consumption objective followed by tariff-cost objective;
+- ASW Custom mode without a window as the normal load-following state, with
+  fixed-power windows only for grid charging or export discharge;
 - battery SOC, charge/discharge limits, reserve and efficiency constraints;
 - versioned site-consumption and battery-SOC forecasts with uncertainty,
   native/no-change and shadow-counterfactual scenarios;
@@ -301,6 +305,8 @@ Acceptance:
   no-action plan;
 - simulation demonstrates improvement over the configured baseline before
   control work begins;
+- planning status remains `learning` until independent PV and load accuracy
+  gates pass, even though shadow trajectories remain visible;
 - load and native-SOC forecasts are independently scored by lead time as
   actuals arrive; and
 - counterfactual shadow SOC is never incorrectly scored against native actual

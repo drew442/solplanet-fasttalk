@@ -144,13 +144,21 @@ instantaneous power. The documented 24 kVA EPS overload rating is explicitly
 excluded because it applies for no more than 10 seconds and is not a battery
 dispatch rating.
 
-The no-daemon-change baseline is no longer an idle-battery assumption. When
-fresh values are available, it projects the ASW's currently stored
-charge/hold/discharge state and power command (Modbus registers 41152/41153)
-until the inverter's native lower or upper SOC bound. The API labels the
-assumption that this current command persists; it cannot predict an unknown
-future native schedule change. If the native command is unavailable, the
-baseline falls back visibly to hold.
+The no-daemon-change baseline models the ASW's high-level run mode from Modbus
+register 41104. For the confirmed Custom configuration it applies native
+self-consumption outside unknown future schedule windows: the inverter follows
+load and absorbs PV surplus within its native SOC and power bounds. Registers
+41152/41153 are retained as current-state evidence but are not incorrectly
+projected as a fixed command across the horizon. See
+[ASW battery operating modes](asw-operating-modes.md).
+
+The planner uses a complete 15-minute horizon, explicitly filling nighttime
+PV with zero while retaining load, tariff, grid and SOC evolution. It prefers
+Custom mode without a window. Fixed battery-power windows are considered only
+for deliberate grid charging or export discharge, and their grid balance does
+not assume that the inverter adds site load to the command. Whole-horizon
+search and a minimum intervention margin prevent the former alternating
+charge/discharge sawtooth.
 
 Observed BMS limits can only reduce the applicable power ceiling. Missing or stale
 SOC, authoritative grid power, derived site load or PV forecast produces an

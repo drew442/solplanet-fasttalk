@@ -125,6 +125,20 @@ POLL_GROUPS = (
         ),
     ),
     Group(
+        "storage_mode",
+        0x03,
+        1101,
+        4,
+        5.0,
+        15.0,
+        (
+            Field(0, "asw.storage.switch"),
+            Field(1, "asw.storage.machine_type"),
+            Field(2, "asw.control.run_mode"),
+            Field(3, "battery.manufacturer"),
+        ),
+    ),
+    Group(
         "meter_state",
         0x03,
         1107,
