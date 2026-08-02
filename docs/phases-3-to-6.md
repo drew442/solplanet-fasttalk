@@ -161,8 +161,11 @@ not assume that the inverter adds site load to the command. Whole-horizon
 search and a minimum intervention margin prevent the former alternating
 charge/discharge sawtooth.
 
-Observed BMS limits can only reduce the applicable power ceiling. Missing or stale
-SOC, authoritative grid power, derived site load or PV forecast produces an
+The instantaneous BMS voltage×current allowance is retained as current-state
+evidence but is not frozen across the forecast because it changes at SOC and
+temperature boundaries. Future slots use the configured/manufacturer ceiling
+and projected SOC headroom; any future execution must re-read the BMS allowance
+as a hard interlock. Missing or stale SOC, authoritative grid power, derived site load or PV forecast produces an
 empty `no_action` plan. The optimiser has no serial transport reference and
 reports `control_commands_sent: 0` and `execution_available: false`.
 Every ready, infeasible and no-action decision is stored with its inputs,

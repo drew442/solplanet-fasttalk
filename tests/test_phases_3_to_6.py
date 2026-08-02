@@ -949,6 +949,8 @@ class Phase6Tests(unittest.TestCase):
                 assumption="owner supplied",
                 schedule=schedule,
             ),
+            observed_charge_limit_w=0,
+            observed_discharge_limit_w=12000,
         )
         recommendations = result["recommendations"]
         self.assertEqual(recommendations[0]["baseline_battery_power_w"], -12000)
@@ -956,6 +958,10 @@ class Phase6Tests(unittest.TestCase):
         self.assertEqual(recommendations[1]["baseline_battery_power_w"], 1500)
         self.assertEqual(recommendations[1]["baseline_grid_power_w"], 0)
         self.assertEqual(recommendations[2]["baseline_battery_power_w"], -12000)
+        self.assertEqual(
+            result["hardware_limits"]["observed_current_charge_limit_w"],
+            0,
+        )
 
     def test_confirmed_schedule_overrides_effective_self_consumption_readback(self):
         schedule = (

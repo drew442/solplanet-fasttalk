@@ -109,6 +109,14 @@ least the energy of the no-change self-consumption baseline. If no fixed-window
 trajectory reduces cost, the recommendation remains self-consumption with no
 window.
 
+An instantaneous BMS current allowance is not extrapolated across the horizon.
+It commonly falls to zero at an SOC boundary and would otherwise make tomorrow's
+charge or discharge physically disappear from the forecast. Future slots use
+the lower of the configured ceiling and the manufacturer's 12 kW rating, with
+projected SOC headroom/available energy and efficiency applied per interval.
+The current BMS voltage×current allowance remains exposed separately and must
+be re-read as an execution-time interlock before any future writable action.
+
 ## Readback and future control boundary
 
 The daemon now reads 41102–41105 as a bounded holding-register read. Register

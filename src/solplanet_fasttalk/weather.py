@@ -213,7 +213,7 @@ class OpenMeteoWorker:
                 ),
                 headers={
                     "Accept": "application/json",
-                    "User-Agent": "solplanet-fasttalk/0.7.2",
+                    "User-Agent": "solplanet-fasttalk/0.7.3",
                 },
             )
             with urlopen(

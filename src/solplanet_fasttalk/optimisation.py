@@ -383,6 +383,8 @@ def simulate_plan(
     charge_limit_w: float,
     discharge_limit_w: float,
     native_baseline: NativeBaseline | None = None,
+    observed_charge_limit_w: float | None = None,
+    observed_discharge_limit_w: float | None = None,
 ) -> dict[str, Any]:
     """Plan fixed windows around the ASW's native self-consumption behavior."""
 
@@ -774,6 +776,16 @@ def simulate_plan(
                 {
                     "charge_limit_w": charge_limit_w,
                     "discharge_limit_w": discharge_limit_w,
+                    "observed_current_charge_limit_w": (
+                        charge_limit_w
+                        if observed_charge_limit_w is None
+                        else observed_charge_limit_w
+                    ),
+                    "observed_current_discharge_limit_w": (
+                        discharge_limit_w
+                        if observed_discharge_limit_w is None
+                        else observed_discharge_limit_w
+                    ),
                     "site_import_limit_w": config.site_import_limit_watts,
                     "site_export_limit_w": config.site_export_limit_watts,
                     "reserve_soc_percent": config.reserve_soc_percent,
@@ -875,8 +887,10 @@ def simulate_plan(
             "manufacturer_max_discharge_w": ASW12KH_T3_MAX_BATTERY_DISCHARGE_W,
             "planning_interval_seconds": config.step_minutes * 60,
             "basis": (
-                "12 kW inverter battery rating, further capped by configured limits and live BMS voltage×current"
+                "future slots use the 12 kW inverter battery rating capped by configured limits and projected SOC headroom; current live BMS voltage×current remains diagnostic evidence and must be rechecked before execution"
             ),
+            "observed_current_charge_limit_w": observed_charge_limit_w,
+            "observed_current_discharge_limit_w": observed_discharge_limit_w,
             "excluded_limit": (
                 "24 kVA EPS overload rating is limited to 10 seconds and is not used for dispatch"
             ),
@@ -1101,12 +1115,10 @@ class OptimisationWorker:
         charge_limit = min(
             self.config.max_charge_watts,
             ASW12KH_T3_MAX_BATTERY_CHARGE_W,
-            observed_charge,
         )
         discharge_limit = min(
             self.config.max_discharge_watts,
             ASW12KH_T3_MAX_BATTERY_DISCHARGE_W,
-            observed_discharge,
         )
         native_baseline = self._native_baseline(required)
         active_native_window = _native_schedule_window(
@@ -1154,6 +1166,8 @@ class OptimisationWorker:
             charge_limit_w=charge_limit,
             discharge_limit_w=discharge_limit,
             native_baseline=native_baseline,
+            observed_charge_limit_w=observed_charge,
+            observed_discharge_limit_w=observed_discharge,
         )
         load_quality = (
             self.history.prediction_quality(
