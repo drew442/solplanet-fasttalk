@@ -25,7 +25,9 @@ has keyboard focus, and Escape closes it.
 ### Present
 
 - authoritative grid import or export;
-- derived site consumption, PV generation and self-sufficiency;
+- derived site consumption, global PV generation and self-sufficiency;
+- separate live external-PV and Solplanet-PV contributions beneath the global
+  PV total;
 - Solplanet battery power and aggregate state of charge;
 - a live energy-flow view with freshness and quality;
 - the current shadow recommendation, its explanation, expected grid flow and
@@ -36,11 +38,13 @@ has keyboard focus, and Escape closes it.
 
 - selectable 6-hour, 24-hour, 7-day and 30-day power charts;
 - grid power with positive import and negative export;
-- site consumption, external-PV AC and Solplanet AC power;
+- site consumption, global PV, Solplanet AC and grid power;
+- a dedicated PV breakdown graph with global, external-PV and Solplanet-PV
+  traces;
 - battery SOC;
 - actual import cost, export revenue and net cost history;
 - today and month-to-date energy/cost totals;
-- historical PV forecast-versus-actual graphs;
+- historical external-PV forecast-versus-actual graphs;
 - separate provider and corrected PV forecast traces;
 - persisted optimiser decisions and their modelled improvements; and
 - recent daemon events.
@@ -50,6 +54,11 @@ every high-rate raw observation. Each returned bucket also carries its sample
 count, minimum and maximum for diagnostics.
 
 ### Future
+
+The current Forecast.Solar planes describe the external east/west array. The
+UI labels this scope explicitly; it does not present that incomplete prediction
+as a global PV forecast. Global forecasts will require the separately measured
+ASW array geometry to be added to the provider integration.
 
 - forecast load and combined east/west PV;
 - provider PV, corrected PV and the current long/short correction factors;

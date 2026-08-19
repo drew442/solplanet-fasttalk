@@ -20,6 +20,12 @@ Fresh grid, external-PV, ASW AC and dedicated ASW PV measurements derive:
 - `site.self_consumption_ratio`; and
 - `site.self_sufficiency_ratio`.
 
+`external_pv.active_power` and `asw.pv.active_power` remain independent
+authoritative component signals. Their non-negative sum is the global
+`site.pv_generation_power`/`site.generation_power` value. Raw, hourly and daily
+history retain both components; selected 15-minute training history retains
+both components and their global sum.
+
 All derived values are withdrawn when a required input is missing, invalid or
 stale. SQLite uses WAL mode and stores raw measurements, events, forecast
 points, hourly rollups, daily rollups, minute tariff-accounting intervals and
@@ -99,6 +105,12 @@ The two-plane request returns one combined forecast. That combined prediction
 is compared with the Eastron's authoritative aggregate external-PV AC power;
 the present CT arrangement cannot provide separate east-versus-west actual
 production. Forecast points are persisted for historical comparison.
+
+This forecast scope remains external-PV-only while the new ASW-connected east,
+west and flat strings are commissioned. The live and historical global PV
+measurements include ASW PV, but the planner must not treat the existing
+two-plane forecast as a complete global prediction. Adding the ASW planes and
+changing forecast correction to the global PV actual are follow-up work.
 
 The base forecast now passes through astronomical night gating and robust
 long/short-term correction against the authoritative Eastron actual. An

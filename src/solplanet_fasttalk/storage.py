@@ -169,6 +169,7 @@ CREATE INDEX IF NOT EXISTS storage_observations_time
 MODEL_TRAINING_SIGNALS = (
     "grid.active_power",
     "external_pv.active_power",
+    "asw.pv.active_power",
     "site.load_power",
     "site.pv_generation_power",
     "site.local_supply_power",

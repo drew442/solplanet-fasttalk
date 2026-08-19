@@ -251,6 +251,21 @@ class DiagnosticsAssetTests(unittest.TestCase):
         self.assertIn('id="costNeutralTarget"', html)
         self.assertIn("effective_reserve_soc_percent", javascript)
 
+    def test_dashboard_graphs_global_and_separate_pv_sources(self):
+        package = resources.files("solplanet_fasttalk.webui")
+        html = package.joinpath("index.html").read_text(encoding="utf-8")
+        javascript = package.joinpath("app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="historyPvChart"', html)
+        self.assertIn('id="historyPvLatest"', html)
+        self.assertIn('"site.pv_generation_power", "Total PV"', javascript)
+        self.assertIn('"external_pv.active_power", "External PV"', javascript)
+        self.assertIn('"asw.pv.active_power", "Solplanet PV"', javascript)
+        self.assertIn(
+            'measurement("site.pv_generation_power")',
+            javascript,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

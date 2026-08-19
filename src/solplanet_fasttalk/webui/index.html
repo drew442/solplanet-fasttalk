@@ -206,13 +206,25 @@
 
       <div class="legend" aria-label="History chart legend">
         <span><i class="legend-load"></i>Consumption</span>
-        <span><i class="legend-solar"></i>External PV</span>
+        <span><i class="legend-solar"></i>Total PV</span>
         <span><i class="legend-asw"></i>Solplanet AC</span>
         <span><i class="legend-grid"></i>Grid (+ import / − export)</span>
       </div>
       <div class="chart-wrap">
         <svg id="historyChart" class="line-chart" role="img" aria-label="Historical power chart"></svg>
         <p id="historyEmpty" class="chart-empty" hidden>No history is available for this range.</p>
+      </div>
+
+      <div class="subchart-head">
+        <span>PV production breakdown</span><strong id="historyPvLatest">—</strong>
+      </div>
+      <div class="legend legend--compact" aria-label="PV production history legend">
+        <span><i class="legend-solar"></i>Total PV</span>
+        <span><i class="legend-external-pv"></i>External PV</span>
+        <span><i class="legend-asw-pv"></i>Solplanet PV</span>
+      </div>
+      <div class="chart-wrap">
+        <svg id="historyPvChart" class="line-chart" role="img" aria-label="Historical total, external and Solplanet PV production chart"></svg>
       </div>
 
       <div class="subchart-head">
@@ -236,7 +248,7 @@
       </div>
 
       <div class="schedule-head">
-        <div><p class="eyebrow">FORECAST ACCURACY</p><h3>Predicted versus actual PV</h3></div>
+        <div><p class="eyebrow">FORECAST ACCURACY</p><h3>Predicted versus actual external PV</h3></div>
         <span id="accuracyHistorySummary" class="quiet">—</span>
       </div>
       <div class="chart-wrap chart-wrap--small">
@@ -258,7 +270,7 @@
         <div>
           <p class="eyebrow">FUTURE</p>
           <h2>What is expected</h2>
-          <p class="panel-intro">PV and load forecast with the feasible shadow schedule applied.</p>
+          <p class="panel-intro">Configured external-PV and load forecast with the feasible shadow schedule applied.</p>
         </div>
         <div class="forecast-meta">
           <span id="forecastStatus" class="quality-chip">Unavailable</span>
@@ -269,8 +281,8 @@
       <div class="legend">
         <span><i class="legend-load"></i>Forecast consumption</span>
         <span>Dashed load range: historical P10–P90</span>
-        <span><i class="legend-solar"></i>Corrected PV</span>
-        <span><i class="legend-provider"></i>Provider PV</span>
+        <span><i class="legend-solar"></i>Corrected external PV</span>
+        <span><i class="legend-provider"></i>Provider external PV</span>
         <span><i class="legend-plan"></i>Expected grid</span>
         <span><i class="legend-baseline"></i>Grid if native command continues</span>
       </div>

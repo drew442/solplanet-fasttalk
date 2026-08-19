@@ -35,9 +35,15 @@ let activeChartInteraction = null;
 
 const powerSeries = [
   ["site.load_power", "Consumption", "#b86242"],
-  ["external_pv.active_power", "External PV", "#d9a629"],
+  ["site.pv_generation_power", "Total PV", "#d9a629"],
   ["asw.active_power", "Solplanet AC", "#3e8b68"],
   ["grid.active_power", "Grid", "#587c95"],
+];
+
+const pvBreakdownSeries = [
+  ["site.pv_generation_power", "Total PV", "#d9a629"],
+  ["external_pv.active_power", "External PV", "#bd9d49", "5 4"],
+  ["asw.pv.active_power", "Solplanet PV", "#df8744", "2 3"],
 ];
 
 function measurement(name) {
@@ -209,9 +215,13 @@ function renderCurrent() {
   const external = number(measurement("external_pv.active_power")?.value);
   const aswPv = number(measurement("asw.pv.active_power")?.value);
   const asw = number(measurement("asw.active_power")?.value);
-  const solar = [external, aswPv]
+  const componentSolar = [external, aswPv]
     .filter((value) => value !== null)
     .reduce((sum, value) => sum + Math.max(0, value), 0);
+  const globalSolar = number(measurement("site.pv_generation_power")?.value);
+  const solar = globalSolar === null
+    ? (external === null && aswPv === null ? null : componentSolar)
+    : globalSolar;
   const battery = number(measurement("battery.power")?.value);
   const soc = number(measurement("battery.soc")?.value);
   const selfSufficiency = measurement("site.self_sufficiency_ratio")?.value;
@@ -227,7 +237,7 @@ function renderCurrent() {
   );
   setText("loadPower", formatPower(load));
   setText("selfSufficiency", `Self-sufficiency ${formatPercent(selfSufficiency, true)}`);
-  setText("solarPower", solar ? formatPower(solar) : external === null && asw === null ? "—" : "0 W");
+  setText("solarPower", formatPower(solar));
   setText("solarSplit", `${formatPower(external)} external · ${formatPower(aswPv)} Solplanet PV`);
   setText("batterySoc", formatPercent(soc));
   setText(
@@ -549,8 +559,8 @@ function renderSchedule() {
     ["forecast_load_w", "Consumption", "#b86242"],
     ["forecast_load_lower_w", "Load P10", "#d49a83", "3 5"],
     ["forecast_load_upper_w", "Load P90", "#d49a83", "3 5"],
-    ["forecast_pv_w", "PV", "#d9a629"],
-    ["forecast_base_pv_w", "Provider PV", "#bd9d49", "4 4"],
+    ["forecast_pv_w", "External PV forecast", "#d9a629"],
+    ["forecast_base_pv_w", "Provider external PV", "#bd9d49", "4 4"],
     ["expected_grid_power_w", "Expected grid", "#76557f"],
     ["baseline_grid_power_w", "Baseline", "#9ba39e", "5 5"],
   ].map(([key, label, color, dash]) => ({
@@ -953,8 +963,12 @@ function renderSpark(id, values) {
 async function loadHistory() {
   const range = ranges[state.range];
   const since = new Date(Date.now() - range.milliseconds).toISOString();
-  const measurementPromise = Promise.all(powerSeries.concat([["battery.soc", "SOC", "#7a638c"]]).map(
-    async ([name, label, color]) => {
+  const requestedSeries = [...new Map(
+    powerSeries.concat(pvBreakdownSeries, [["battery.soc", "SOC", "#7a638c"]])
+      .map((item) => [item[0], item]),
+  ).values()];
+  const measurementPromise = Promise.all(requestedSeries.map(
+    async ([name, label, color, dash]) => {
       const query = new URLSearchParams({
         name,
         since,
@@ -963,8 +977,10 @@ async function loadHistory() {
       });
       const payload = await api(`/measurements/history?${query}`);
       return {
+        name,
         label,
         color,
+        dash,
         points: (payload.measurements || []).map((item) => ({
           timestamp: item.observed_at,
           value: number(item.value),
@@ -1007,10 +1023,31 @@ async function loadHistory() {
   state.historical.loadQuality = loadQuality;
   state.historical.socQuality = socQuality;
   state.historical.trainingCoverage = trainingCoverage;
-  renderChart("historyChart", results.slice(0, 4), { includeZero: true });
-  renderChart("historySocChart", [results[4]], { percent: true });
-  $("historyEmpty").hidden = results.slice(0, 4).some((item) => item.points.length);
-  const latestSoc = [...results[4].points].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0];
+  const byName = new Map(results.map((item) => [item.name, item]));
+  const select = (definitions) => definitions
+    .map(([name]) => byName.get(name))
+    .filter(Boolean);
+  const historyPower = select(powerSeries);
+  const historyPv = select(pvBreakdownSeries);
+  const historySoc = byName.get("battery.soc") || {
+    label: "SOC", color: "#7a638c", points: [],
+  };
+  renderChart("historyChart", historyPower, { includeZero: true });
+  renderChart("historyPvChart", historyPv, { includeZero: true });
+  renderChart("historySocChart", [historySoc], { percent: true });
+  $("historyEmpty").hidden = historyPower.some((item) => item.points.length);
+  const latest = (series) => [...(series?.points || [])]
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0];
+  const latestTotalPv = latest(byName.get("site.pv_generation_power"));
+  const latestExternalPv = latest(byName.get("external_pv.active_power"));
+  const latestAswPv = latest(byName.get("asw.pv.active_power"));
+  setText(
+    "historyPvLatest",
+    latestTotalPv
+      ? `${formatPower(latestTotalPv.value)} total · ${formatPower(latestExternalPv?.value)} external · ${formatPower(latestAswPv?.value)} Solplanet`
+      : "—",
+  );
+  const latestSoc = latest(historySoc);
   setText("historySocLatest", latestSoc ? `${formatPercent(latestSoc.value)} latest` : "—");
   renderHistoricalInsights();
   renderSchedule();
@@ -1061,7 +1098,7 @@ function renderHistoricalInsights() {
   const actualComparison = comparison.length ? comparison : baseComparison;
   renderChart("accuracyHistoryChart", [
     {
-      label: "Corrected PV",
+      label: "Corrected external PV",
       color: "#d9a629",
       points: comparison.map((item) => ({
         timestamp: item.forecast_at,
@@ -1069,7 +1106,7 @@ function renderHistoricalInsights() {
       })).filter((item) => item.value !== null),
     },
     {
-      label: "Provider PV",
+      label: "Provider external PV",
       color: "#bd9d49",
       dash: "4 4",
       points: baseComparison.map((item) => ({
@@ -1078,7 +1115,7 @@ function renderHistoricalInsights() {
       })).filter((item) => item.value !== null),
     },
     {
-      label: "Actual PV",
+      label: "Actual external PV",
       color: "#3e8b68",
       points: actualComparison.map((item) => ({
         timestamp: item.forecast_at,

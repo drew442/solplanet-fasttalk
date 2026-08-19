@@ -20,16 +20,18 @@ and optimiser workings directly usable from a phone or desktop browser.
 
 | Component | Connection | Role |
 | --- | --- | --- |
-| Solplanet ASW12kH-T3 | Direct Modbus RTU on MONITOR pins 1–2 | Solplanet inverter, ESS, aggregate battery and future control |
+| Solplanet ASW12kH-T3 with directly connected PV | Direct Modbus RTU on MONITOR pins 1–2 | Solplanet inverter, PV, ESS, aggregate battery and future control |
 | Three parallel seven-module Ai-HB G2 systems | Reported through the ASW | Energy storage |
 | Eastron SEM3-M-2L-CT | Passive terminal-8 observation through SH-U11F RX | Authoritative grid and external-PV measurement |
 | Solis-10K with 12.4 kW east/west array | Measured by Eastron slave 2 | External AC-coupled PV |
 | Forecast.Solar Personal Plus | HTTPS integration | East/west PV forecast |
 | GloBird ZEROHERO VPP | Configured tariff integration | Import/export price model |
 
-The ASW has no directly connected PV and its terminal-10 CTs are not fitted.
-The Eastron grid CTs cover all three grid phases and its second set covers all
-three Solis feeder phases.
+The ASW PV installation comprises separate east, west and flat strings and is
+being commissioned incrementally. The daemon reads its aggregate PV power and
+energy directly from the ASW. The terminal-10 CTs are not fitted. The Eastron
+grid CTs cover all three grid phases and its second set covers all three Solis
+feeder phases.
 
 ## Source authority
 
@@ -41,6 +43,8 @@ replacing it.
 | --- | --- | --- |
 | Grid import/export power and energy | Eastron slave 1 | ASW smart-meter mirror |
 | External-PV AC power and energy | Eastron slave 2 | Direct Solis/vendor driver |
+| ASW PV power and energy | ASW MONITOR dedicated PV registers | None initially |
+| Global PV power | Derived external PV plus ASW PV | Component signals remain separately available |
 | ASW inverter power, state and faults | ASW MONITOR | None initially |
 | Battery power, SOC, SOH, temperature and limits | ASW MONITOR | Future direct BMS integration |
 | External-inverter DC inputs, temperature and faults | Direct vendor driver, when installed | Not required for plant accounting |

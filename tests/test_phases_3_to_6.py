@@ -69,6 +69,23 @@ def measurement(name, value, *, age=0, max_age=10, unit="W"):
 
 
 class Phase3Tests(unittest.TestCase):
+    def test_asw_and_external_pv_are_separate_and_sum_to_global_pv(self):
+        state = PlantState()
+        state.publish_many(
+            [
+                measurement("grid.active_power", 50),
+                measurement("external_pv.active_power", 3371.7),
+                measurement("asw.active_power", -2490),
+                measurement("asw.pv.active_power", 2266),
+            ]
+        )
+        current = state.current()
+
+        self.assertEqual(current["asw.pv.active_power"]["value"], 2266)
+        self.assertEqual(current["external_pv.active_power"]["value"], 3371.7)
+        self.assertEqual(current["site.pv_generation_power"]["value"], 5637.7)
+        self.assertEqual(current["site.generation_power"]["value"], 5637.7)
+
     def test_derived_self_consumption_has_provenance(self):
         state = PlantState()
         state.publish_many(
@@ -186,6 +203,55 @@ class Phase3Tests(unittest.TestCase):
                     "value"
                 ],
                 123.4,
+            )
+
+    def test_asw_pv_is_retained_separately_at_training_resolution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "history.sqlite3")
+            initialize_database(database)
+            observed = (
+                dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+            ).replace(minute=10, second=0, microsecond=0)
+            with sqlite3.connect(database) as connection:
+                for name, value in (
+                    ("external_pv.active_power", 3000),
+                    ("asw.pv.active_power", 2200),
+                    ("site.pv_generation_power", 5200),
+                ):
+                    connection.execute(
+                        """
+                        INSERT INTO measurements (
+                            observed_at, name, value_num, value_text, unit,
+                            quality, source, authority, access_mode, metadata_json
+                        ) VALUES (?, ?, ?, NULL, 'W', 'good', 'test',
+                                  'authoritative', 'test', '{}')
+                        """,
+                        (observed.isoformat(), name, value),
+                    )
+                connection.commit()
+
+            StorageMaintainer(
+                database,
+                StorageConfig(
+                    raw_retention_days=10000,
+                    quarter_hour_retention_days=10000,
+                    hourly_retention_days=10000,
+                    daily_retention_days=10000,
+                ),
+            ).run_once()
+            history = HistoryReader(database)
+
+            self.assertEqual(
+                history.measurements(
+                    "asw.pv.active_power", resolution="quarter_hour"
+                )[0]["value"],
+                2200,
+            )
+            self.assertEqual(
+                history.measurements(
+                    "site.pv_generation_power", resolution="quarter_hour"
+                )[0]["value"],
+                5200,
             )
 
     def test_persisted_forecast_compares_with_authoritative_actual(self):

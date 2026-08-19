@@ -43,6 +43,12 @@ Across 1,283 available daylight issue/target pairs its mean error
 issuances for the same target are not independent and the period is much too
 short to certify accuracy. They are a starting observation only.
 
+The audit above predates installation of PV on the ASW. The dedicated ASW PV
+register is now a live, separately retained production source. Global PV is
+the non-negative sum of this signal and the authoritative external-PV meter;
+the existing Forecast.Solar correction remains explicitly external-PV-only
+until the ASW array planes are added.
+
 ## PV forecast model
 
 Forecast.Solar remains the base PV model because it already combines array

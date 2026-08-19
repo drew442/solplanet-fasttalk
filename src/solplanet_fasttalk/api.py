@@ -508,10 +508,12 @@ class API:
                     "id": "asw",
                     "type": "hybrid_inverter_ess",
                     "access_mode": "direct_wired_modbus",
-                    "authoritative_for": ["asw", "battery"],
+                    "authoritative_for": ["asw", "asw_pv", "battery"],
                     "capabilities": [
                         "inverter_state",
                         "inverter_power",
+                        "pv_power",
+                        "pv_energy",
                         "aggregate_battery",
                         "bms_limits",
                         "faults",
@@ -546,6 +548,8 @@ class API:
             "accounting": {
                 "grid": "eastron-terminal8:slave-1",
                 "external_pv_ac": "eastron-terminal8:slave-2",
+                "asw_pv_ac": "asw-monitor:dedicated-pv-register",
+                "site_pv_ac": "external_pv_ac + asw_pv_ac",
                 "source_resolution": "authoritative_meter_wins",
             },
             "control": {

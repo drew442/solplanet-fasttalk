@@ -125,9 +125,8 @@ class PlantState:
             + float(asw.value)
         )
         # ASW AC power includes battery charge/discharge. It is not PV power.
-        # The initial plant has no PV connected to the ASW, and the dedicated
-        # ASW PV register correctly reports zero. Keep these concepts separate
-        # so battery discharge can never appear as night-time solar production.
+        # Keep it separate from the dedicated ASW PV register so battery
+        # discharge can never appear as solar production.
         generation = max(0.0, float(external.value)) + max(
             0.0, float(asw_pv.value)
         )
