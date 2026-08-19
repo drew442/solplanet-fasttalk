@@ -189,6 +189,54 @@ MODEL_TRAINING_SIGNALS = (
 )
 
 
+_EASTRON_ENERGY_SUFFIXES = (
+    "energy.forward_active",
+    "energy.reverse_active",
+    "energy.forward_reactive",
+    "energy.reverse_reactive",
+    "energy.apparent",
+    "energy.total_active",
+    "energy.total_reactive",
+    *(
+        f"phase.l{phase}.energy.{direction}_{kind}"
+        for phase in range(1, 4)
+        for direction in ("forward", "reverse", "total")
+        for kind in ("active", "reactive")
+    ),
+)
+
+# Startup needs only the latest value of known counters. Keeping the names
+# explicit lets SQLite seek through measurements_name_time for each signal;
+# a suffix LIKE such as '%.energy.%' forces a full raw-telemetry scan and makes
+# restart time grow with the database.
+COUNTER_SIGNAL_NAMES = (
+    *(
+        f"{prefix}.{suffix}"
+        for prefix in ("grid", "external_pv")
+        for suffix in _EASTRON_ENERGY_SUFFIXES
+    ),
+    "grid.energy.import",
+    "grid.energy.export",
+    "external_pv.energy.generated",
+    "external_pv.energy.reverse",
+    "asw.pv.energy.today",
+    "asw.pv.energy.total",
+    "battery.energy.charge_today",
+    "battery.energy.discharge_today",
+    "asw.reported_site.energy.consumption_today",
+    "asw.reported_site.energy.generation_today",
+    "asw.energy.today",
+    "asw.energy.total",
+    "asw.grid.energy.charge_today",
+    "asw.grid.energy.charge_total",
+    "solis.energy.total",
+    "solis.energy.this_month",
+    "solis.energy.last_month",
+    "solis.energy.today",
+    "solis.energy.yesterday",
+)
+
+
 def initialize_database(path: str) -> None:
     database = Path(path)
     database.parent.mkdir(parents=True, exist_ok=True)
@@ -472,18 +520,19 @@ class HistoryReader:
 
     def counter_baselines(self) -> dict[str, dict[str, Any]]:
         with sqlite3.connect(self.path) as connection:
-            rows = connection.execute(
-                """
-                SELECT m.name, m.observed_at, m.value_num, m.unit, m.source
-                FROM measurements AS m
-                JOIN (
-                    SELECT name, MAX(id) AS id
+            rows = []
+            for name in COUNTER_SIGNAL_NAMES:
+                row = connection.execute(
+                    """
+                    SELECT name, observed_at, value_num, unit, source
                     FROM measurements
-                    WHERE value_num IS NOT NULL AND name LIKE '%.energy.%'
-                    GROUP BY name
-                ) AS latest ON latest.id = m.id
-                """
-            ).fetchall()
+                    WHERE name = ? AND value_num IS NOT NULL
+                    ORDER BY observed_at DESC, id DESC LIMIT 1
+                    """,
+                    (name,),
+                ).fetchone()
+                if row is not None:
+                    rows.append(row)
         return {
             row[0]: {
                 "observed_at": row[1],

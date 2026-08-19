@@ -30,7 +30,9 @@ All derived values are withdrawn when a required input is missing, invalid or
 stale. SQLite uses WAL mode and stores raw measurements, events, forecast
 points, hourly rollups, daily rollups, minute tariff-accounting intervals and
 complete shadow-plan decisions. The latest cumulative energy counters remain
-available as restart baselines.
+available as restart baselines. Startup retrieves them through bounded indexed
+lookups over the supported counter names; it never scans the complete raw
+telemetry table.
 
 History accepts `resolution=raw`, `resolution=hourly` or `resolution=daily`.
 Service metrics are exposed in Prometheus text format at `/metrics`.

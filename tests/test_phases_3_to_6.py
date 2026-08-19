@@ -205,6 +205,47 @@ class Phase3Tests(unittest.TestCase):
                 123.4,
             )
 
+    def test_counter_baselines_use_indexed_supported_signal_lookups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "history.sqlite3")
+            initialize_database(database)
+            observed = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+            with sqlite3.connect(database) as connection:
+                for offset, value in enumerate((100.0, 125.0)):
+                    connection.execute(
+                        """
+                        INSERT INTO measurements (
+                            observed_at, name, value_num, value_text, unit,
+                            quality, source, authority, access_mode, metadata_json
+                        ) VALUES (?, 'asw.pv.energy.total', ?, NULL, 'kWh',
+                                  'good', 'asw.monitor', 'authoritative',
+                                  'direct_wired_modbus', '{}')
+                        """,
+                        (
+                            (observed + dt.timedelta(seconds=offset)).isoformat(),
+                            value,
+                        ),
+                    )
+                connection.commit()
+                plan = connection.execute(
+                    """
+                    EXPLAIN QUERY PLAN
+                    SELECT name, observed_at, value_num, unit, source
+                    FROM measurements
+                    WHERE name = ? AND value_num IS NOT NULL
+                    ORDER BY observed_at DESC, id DESC LIMIT 1
+                    """,
+                    ("asw.pv.energy.total",),
+                ).fetchall()
+
+            baselines = HistoryReader(database).counter_baselines()
+
+        self.assertEqual(baselines["asw.pv.energy.total"]["value"], 125)
+        self.assertTrue(
+            any("measurements_name_time" in row[3] for row in plan),
+            plan,
+        )
+
     def test_asw_pv_is_retained_separately_at_training_resolution(self):
         with tempfile.TemporaryDirectory() as directory:
             database = str(Path(directory) / "history.sqlite3")
