@@ -114,6 +114,29 @@ class DiagnosticsHistoryTests(unittest.TestCase):
             status["growth"]["linear_total_bytes_365_days"],
         )
 
+    def test_storage_status_uses_first_raw_row_without_observations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "history.sqlite3")
+            initialize_database(database)
+            observed_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    """
+                    INSERT INTO measurements (
+                        observed_at, name, value_num, value_text, unit,
+                        quality, source, authority, access_mode, metadata_json
+                    ) VALUES (?, 'grid.active_power', 0, NULL, 'W', 'good',
+                              'test', 'authoritative', 'test', '{}')
+                    """,
+                    (observed_at.isoformat(),),
+                )
+                connection.commit()
+
+            status = HistoryReader(database).storage_status()
+
+        self.assertEqual(status["growth"]["method"], "database_age_estimate")
+        self.assertGreaterEqual(status["growth"]["data_age_days"], 2.9)
+
 
 class DiagnosticsSecurityTests(unittest.TestCase):
     def _config(self, directory: str, api: str) -> Path:

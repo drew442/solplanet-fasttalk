@@ -384,6 +384,56 @@ class Phase3Tests(unittest.TestCase):
             )["scoreable"]
         )
 
+    def test_prediction_quality_prefers_model_ready_rollups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "history.sqlite3")
+            initialize_database(database)
+            history = HistoryReader(database)
+            target = dt.datetime.now(dt.timezone.utc).replace(
+                minute=0, second=0, microsecond=0
+            )
+            history.record_predictions(
+                model="test-load",
+                model_version="v1",
+                signal="site.load_power",
+                scenario="expected",
+                issued_at=(target - dt.timedelta(hours=1)).isoformat(),
+                unit="W",
+                points=[{"timestamp": target.isoformat(), "value": 1000}],
+            )
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    """
+                    INSERT INTO measurements (
+                        observed_at, name, value_num, value_text, unit,
+                        quality, source, authority, access_mode, metadata_json
+                    ) VALUES (?, 'site.load_power', 9000, NULL, 'W', 'good',
+                              'plant_model', 'derived', 'calculated', '{}')
+                    """,
+                    (target.isoformat(),),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO measurement_rollups (
+                        period_start, period_seconds, name, samples,
+                        value_avg, value_min, value_max, value_last, unit,
+                        quality, source, authority
+                    ) VALUES (?, 900, 'site.load_power', 100, 1100, 900,
+                              1300, 1100, 'W', 'good', 'plant_model',
+                              'derived')
+                    """,
+                    (target.isoformat(),),
+                )
+                connection.commit()
+
+            quality = history.prediction_quality(
+                signal="site.load_power",
+                scenario="expected",
+            )
+
+        self.assertEqual(quality["samples"], 1)
+        self.assertEqual(quality["overall"]["mae"], 100)
+
 
 class Phase4Tests(unittest.TestCase):
     def test_solis_plugin_is_diagnostic_and_optional(self):

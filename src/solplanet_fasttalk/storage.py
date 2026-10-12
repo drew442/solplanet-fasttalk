@@ -775,19 +775,8 @@ class HistoryReader:
                 return []
             earliest = min(row[3] for row in predictions)
             latest = max(row[3] for row in predictions)
-            raw = connection.execute(
-                """
-                SELECT
-                    CAST(strftime('%s', observed_at) AS INTEGER) / 60,
-                    AVG(value_num)
-                FROM measurements
-                WHERE name = ? AND value_num IS NOT NULL
-                  AND julianday(observed_at) >= julianday(?, '-15 minutes')
-                  AND julianday(observed_at) <= julianday(?, '+15 minutes')
-                GROUP BY 1
-                """,
-                (signal, earliest, latest),
-            ).fetchall()
+            lower = (dt_from_iso(earliest) - dt.timedelta(minutes=15)).isoformat()
+            upper = (dt_from_iso(latest) + dt.timedelta(minutes=15)).isoformat()
             rollups = connection.execute(
                 """
                 SELECT
@@ -796,11 +785,30 @@ class HistoryReader:
                 FROM measurement_rollups
                 WHERE name = ? AND period_seconds = 900
                   AND value_avg IS NOT NULL
-                  AND julianday(period_start) >= julianday(?, '-15 minutes')
-                  AND julianday(period_start) <= julianday(?, '+15 minutes')
+                  AND period_start >= ?
+                  AND period_start <= ?
                 """,
-                (signal, earliest, latest),
+                (signal, lower, upper),
             ).fetchall()
+            # Maintenance creates durable 15-minute actuals for every model
+            # signal. Prefer them for scoring: regrouping raw site-load data
+            # can otherwise scan millions of redundant derived samples. A raw
+            # fallback keeps scoring useful before the first rollup exists.
+            raw = []
+            if not rollups:
+                raw = connection.execute(
+                    """
+                    SELECT
+                        CAST(strftime('%s', observed_at) AS INTEGER) / 60,
+                        AVG(value_num)
+                    FROM measurements
+                    WHERE name = ? AND value_num IS NOT NULL
+                      AND observed_at >= ?
+                      AND observed_at <= ?
+                    GROUP BY 1
+                    """,
+                    (signal, lower, upper),
+                ).fetchall()
         actual_by_minute = {int(row[0]): float(row[1]) for row in rollups}
         actual_by_minute.update({int(row[0]): float(row[1]) for row in raw})
         result = []
@@ -968,19 +976,50 @@ class HistoryReader:
                 ORDER BY observed_at
                 """
             ).fetchall()
-            earliest = connection.execute(
-                """
-                SELECT MIN(timestamp) FROM (
-                    SELECT MIN(observed_at) AS timestamp FROM measurements
-                    UNION ALL SELECT MIN(period_start) FROM measurement_rollups
-                    UNION ALL SELECT MIN(issued_at) FROM forecast_points
-                    UNION ALL SELECT MIN(issued_at) FROM forecast_context_points
-                    UNION ALL SELECT MIN(issued_at) FROM prediction_points
-                    UNION ALL SELECT MIN(period_start) FROM financial_intervals
-                    UNION ALL SELECT MIN(generated_at) FROM plan_history
+            # measurements_name_time cannot answer MIN(observed_at) without
+            # walking every signal in the high-rate raw table. On a mature
+            # installation that turns the diagnostics snapshot into a
+            # multi-minute, multi-gigabyte scan. Read the first rowid instead
+            # and use indexed minima for compact, long-lived tables.
+            earliest_candidates = [
+                row[0]
+                for row in (
+                    connection.execute(
+                        "SELECT observed_at FROM measurements "
+                        "ORDER BY id LIMIT 1"
+                    ).fetchone(),
+                    connection.execute(
+                        "SELECT MIN(period_start) FROM measurement_rollups"
+                    ).fetchone(),
+                    connection.execute(
+                        "SELECT issued_at FROM forecast_points "
+                        "ORDER BY id LIMIT 1"
+                    ).fetchone(),
+                    connection.execute(
+                        "SELECT issued_at FROM forecast_context_points "
+                        "ORDER BY id LIMIT 1"
+                    ).fetchone(),
+                    connection.execute(
+                        "SELECT issued_at FROM prediction_points "
+                        "ORDER BY id LIMIT 1"
+                    ).fetchone(),
+                    connection.execute(
+                        "SELECT MIN(period_start) FROM financial_intervals"
+                    ).fetchone(),
+                    connection.execute(
+                        "SELECT MIN(generated_at) FROM plan_history"
+                    ).fetchone(),
+                    connection.execute(
+                        "SELECT MIN(observed_at) FROM storage_observations"
+                    ).fetchone(),
                 )
-                """
-            ).fetchone()[0]
+                if row and row[0]
+            ]
+            earliest = (
+                min(earliest_candidates, key=dt_from_iso)
+                if earliest_candidates
+                else None
+            )
 
         allocated_bytes = page_count * page_size
         used_bytes = max(0, page_count - free_pages) * page_size
